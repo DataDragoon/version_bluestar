@@ -11,12 +11,36 @@ eliminates random PLL phase offsets between TX and RX synthesizers.
 import threading
 import time
 import numpy as np
+from datetime import datetime
 
 from bladerf_driver import BladeRFDriver
 from bladerf._bladerf import ffi, libbladeRF
 import bladerf
 
 SPEED_OF_LIGHT = 299_792_458
+
+
+def _log_timing(event, **details):
+    """Log timing events in human-readable format."""
+    timestamp = datetime.now().strftime('%H:%M:%S.%f')  # Microsecond precision
+    detail_str = ' '.join(f'{k}={v}' for k, v in details.items()) if details else ''
+    print(f"[{timestamp}] SFCW | {event:<30} {detail_str}", flush=True)
+
+
+def _log_separator(char='─'):
+    """Print a visual separator line."""
+    timestamp = datetime.now().strftime('%H:%M:%S.%f')  # Microsecond precision
+    print(f"[{timestamp}] SFCW | {char * 70}", flush=True)
+
+
+def _format_duration(seconds):
+    """Format duration in human-readable way."""
+    if seconds < 0.001:
+        return f"{seconds*1000000:.0f}µs"
+    elif seconds < 1:
+        return f"{seconds*1000:.1f}ms"
+    else:
+        return f"{seconds:.3f}s"
 
 # Master quick-tune table: covers the whole usable band at a fixed grid, generated
 # once per device connection. Any sweep's start/stop/step is snapped onto this grid
@@ -504,6 +528,17 @@ class SFCWEngine:
         freqs, qt_rx, qt_tx = self._build_sweep_grid(start, stop, step)
         num_steps = len(freqs)
 
+        _log_separator('═')
+        _log_timing("SWEEP START",
+                   start=f"{start/1e9:.3f}GHz",
+                   stop=f"{stop/1e9:.3f}GHz",
+                   step=f"{step/1e6:.0f}MHz",
+                   num_steps=num_steps,
+                   num_buffers=num_buffers,
+                   settle_count=settle_count)
+
+        sweep_start = time.time()
+
         def progress(i):
             if self._callback and i % 10 == 0:
                 self._callback({
@@ -513,14 +548,33 @@ class SFCWEngine:
                     'freq_mhz': freqs[i] / 1e6,
                 })
 
+        capture_start = time.time()
         h_cal, dropped_steps = self._sweep_core(freqs, qt_rx, qt_tx, num_buffers, settle_count, progress)
+        capture_duration = time.time() - capture_start
+
         if h_cal is None:
             return None
+
+        _log_timing("CAPTURE COMPLETE",
+                   duration=_format_duration(capture_duration),
+                   valid_steps=f"{num_steps-dropped_steps}/{num_steps}")
 
         if dropped_steps > 0:
             print(f"[sfcw] WARNING: {dropped_steps}/{num_steps} steps had incomplete captures")
 
-        return self._process_h_cal(h_cal)
+        postproc_start = time.time()
+        result = self._process_h_cal(h_cal)
+        postproc_duration = time.time() - postproc_start
+
+        total_duration = time.time() - sweep_start
+
+        _log_timing("SWEEP END",
+                   total=_format_duration(total_duration),
+                   capture=_format_duration(capture_duration),
+                   postproc=_format_duration(postproc_duration))
+        _log_separator('═')
+
+        return result
 
     def _perform_sweep_raw(self):
         """Like _perform_sweep but returns raw h_cal array for averaging."""
@@ -618,18 +672,25 @@ class SFCWEngine:
         stop = self.stop_freq
         step = self.step_size
 
+        _log_timing("POST-PROC START", operation="phase_unwrap")
+        t1 = time.time()
         phase_raw = np.angle(h_cal)
         phase_unwrapped = np.unwrap(phase_raw)
         coeffs = np.polyfit(np.arange(num_steps), phase_unwrapped, 1)
         residuals = phase_unwrapped - np.polyval(coeffs, np.arange(num_steps))
         phase_std = float(np.std(residuals))
+        _log_timing("  Phase unwrap done", time=_format_duration(time.time() - t1))
 
+        _log_timing("  Starting IFFT", nfft=num_steps*4)
+        t2 = time.time()
         window = np.hanning(num_steps)
         h_windowed = h_cal * window
         nfft = num_steps * 4
         range_profile = np.fft.ifft(h_windowed, n=nfft)
         magnitude_db = 20 * np.log10(np.abs(range_profile) + 1e-12)
+        _log_timing("  IFFT done", time=_format_duration(time.time() - t2))
 
+        t3 = time.time()
         max_range = SPEED_OF_LIGHT / (2 * step)
         distances = np.arange(nfft) / nfft * max_range - self.range_offset
 
@@ -643,6 +704,7 @@ class SFCWEngine:
 
         h_cal_real = h_cal.real.tolist()
         h_cal_imag = h_cal.imag.tolist()
+        _log_timing("  Array formatting done", time=_format_duration(time.time() - t3))
 
         return {
             'type': 'range_profile',
