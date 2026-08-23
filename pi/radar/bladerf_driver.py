@@ -1,14 +1,17 @@
 """bladeRF hardware abstraction — supports dual TX/RX for SFCW reference channel."""
 
-import threading
 import time
+import threading
 import numpy as np
 import bladerf
 from bladerf._bladerf import ChannelLayout, Format, ffi, libbladeRF
 
 SCALE = 2047
 MGC = libbladeRF.BLADERF_GAIN_MGC
-TUNING_MODE_FPGA = libbladeRF.BLADERF_TUNING_MODE_FPGA
+
+# AD9361 RFIC registers for tracking calibration control
+_REG_CAL_CONFIG_2 = 0x16A  # Bit 0: BBDC tracking, Bit 1: RFDC tracking
+_REG_CAL_CONFIG_3 = 0x16B  # Bit 0: RX Quadrature tracking
 
 
 class BladeRFDriver:
@@ -36,11 +39,14 @@ class BladeRFDriver:
         self._lock = threading.Lock()
         self._tx_buffer = None
         self._dual_channel = False
+        self._last_layout = None  # 'x1' or 'x2' — tracks sync_config state
+        self._metadata_enabled = False  # Tracks if metadata format is active
 
     def open(self):
         self.device = bladerf.BladeRF()
         self.serial = self.device.get_serial()
         self._configure_channels()
+        self._lock_tracking_calibrations()
 
     def close(self):
         self.stop_tx()
@@ -49,18 +55,73 @@ class BladeRFDriver:
             self.device.close()
             self.device = None
 
-    def reset(self):
-        """Full device close + reopen. Clears all USB/RFIC state."""
-        self.stop_tx()
-        self.stop_rx()
-        self.stop_tx_dual()
-        self.stop_rx_dual()
+    def reopen(self):
+        """Close and reopen device — required to reset sync_config channel layout."""
         if self.device:
             self.device.close()
         self.device = bladerf.BladeRF()
         self.serial = self.device.get_serial()
-        self._configure_channels()
-        print("[bladerf] Device reset complete")
+        self._dual_channel = False
+        self._last_layout = None
+        self._lock_tracking_calibrations()
+
+    def _lock_tracking_calibrations(self):
+        """Disable AD9361 continuous tracking calibrations for deterministic gain.
+
+        The AD9361 runs background loops that continuously adjust RX quadrature,
+        BB DC offset, and RF DC offset corrections. These cause non-deterministic
+        amplitude/phase variation even with fixed gain registers. We run one-shot
+        calibration at init, then freeze the correction coefficients.
+        """
+        try:
+            # Trigger one-shot RX quadrature calibration before freezing.
+            # AD9361 reg 0x016 (Calibration Control): writing 0x32 triggers
+            # RX quad cal + TX quad cal (one-shot, not tracking).
+            self._write_rfic_reg(0x016, 0x32)
+            time.sleep(0.1)  # Wait for cal to complete
+
+            # Disable RX quadrature tracking (reg 0x16B bit 0)
+            reg_val = self._read_rfic_reg(_REG_CAL_CONFIG_3)
+            reg_val &= ~0x01
+            self._write_rfic_reg(_REG_CAL_CONFIG_3, reg_val)
+
+            # Disable BB DC tracking and RF DC tracking (reg 0x16A bits 0,1)
+            reg_val = self._read_rfic_reg(_REG_CAL_CONFIG_2)
+            reg_val &= ~0x03
+            self._write_rfic_reg(_REG_CAL_CONFIG_2, reg_val)
+
+            print("[bladerf] Tracking calibrations locked (RX quad, BBDC, RFDC disabled)")
+        except RuntimeError as e:
+            print(f"[bladerf] WARNING: Could not lock tracking cals: {e}")
+            print("[bladerf]   Non-deterministic gain behavior may persist")
+
+    def run_oneshot_calibration(self):
+        """Trigger one-shot RX/TX quadrature calibration without enabling tracking.
+
+        Call this before a sweep begins (at the sweep's center frequency) to get
+        fresh IQ correction coefficients. Tracking remains disabled afterward.
+        """
+        try:
+            self._write_rfic_reg(0x016, 0x32)
+            time.sleep(0.1)
+        except RuntimeError:
+            pass
+
+    def _read_rfic_reg(self, addr):
+        """Read AD9361 register via libbladeRF RFIC SPI interface."""
+        dev_ptr = self.device.dev[0]
+        val = ffi.new("uint8_t *")
+        rc = libbladeRF.bladerf_get_rfic_register(dev_ptr, 0, int(addr), val)
+        if rc != 0:
+            raise RuntimeError(f"RFIC read reg 0x{addr:03X} failed: {rc}")
+        return val[0]
+
+    def _write_rfic_reg(self, addr, val):
+        """Write AD9361 register via libbladeRF RFIC SPI interface."""
+        dev_ptr = self.device.dev[0]
+        rc = libbladeRF.bladerf_set_rfic_register(dev_ptr, 0, int(addr), int(val) & 0xFF)
+        if rc != 0:
+            raise RuntimeError(f"RFIC write reg 0x{addr:03X}=0x{val:02X} failed: {rc}")
 
     def _configure_channels(self):
         ch_tx = self.device.Channel(bladerf.CHANNEL_TX(0))
@@ -96,41 +157,6 @@ class BladeRFDriver:
 
         print(f"[bladerf] Dual-channel configured: TX1={gains_tx[0]}dB TX2={gains_tx[1]}dB RX1={gains_rx[0]}dB RX2={gains_rx[1]}dB")
 
-    def reapply_dual_gains(self):
-        """Re-push TX1/TX2/RX1/RX2 gains after enabling TX/RX modules.
-
-        enable_module() resets gain state, so any dual-channel start (start_tx_dual,
-        start_rx_dual) needs this called afterward or the gains configured by
-        _configure_channels_dual() are silently lost. Safe to call even if only one
-        direction's modules are enabled — setting a gain register for a disabled
-        module just takes effect whenever it's next enabled.
-        """
-        dev_ptr = self.device.dev[0]
-        libbladeRF.bladerf_set_gain_mode(dev_ptr, bladerf.CHANNEL_RX(0), MGC)
-        libbladeRF.bladerf_set_gain_mode(dev_ptr, bladerf.CHANNEL_RX(1), MGC)
-        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_RX(0), int(self.rx_gain))
-        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_RX(1), int(self.rx2_gain))
-        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_TX(0), int(self.tx_gain))
-        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_TX(1), int(self.tx2_gain))
-
-    def set_tuning_mode_fpga(self):
-        """Switch to FPGA tuning mode — retunes execute on-FPGA, no USB round-trip."""
-        dev_ptr = self.device.dev[0]
-        rc = libbladeRF.bladerf_set_tuning_mode(dev_ptr, TUNING_MODE_FPGA)
-        if rc != 0:
-            print(f"[bladerf] WARNING: set_tuning_mode FPGA returned {rc}")
-        else:
-            print("[bladerf] Tuning mode set to FPGA")
-
-    def get_timestamp(self, direction):
-        """Get current hardware timestamp (in sample counts) for TX or RX direction."""
-        dev_ptr = self.device.dev[0]
-        ts = ffi.new('uint64_t *')
-        rc = libbladeRF.bladerf_get_timestamp(dev_ptr, direction, ts)
-        if rc != 0:
-            raise RuntimeError(f"bladerf_get_timestamp failed: rc={rc}")
-        return ts[0]
-
     def set_frequency(self, freq_hz):
         with self._lock:
             self.center_freq = int(freq_hz)
@@ -162,16 +188,7 @@ class BladeRFDriver:
             ch_tx.bandwidth = self.bandwidth
             ch_rx.sample_rate = self.sample_rate
             ch_rx.bandwidth = self.bandwidth
-            if self._dual_channel:
-                ch_tx2 = self.device.Channel(bladerf.CHANNEL_TX(1))
-                ch_rx2 = self.device.Channel(bladerf.CHANNEL_RX(1))
-                ch_tx2.sample_rate = self.sample_rate
-                ch_tx2.bandwidth = self.bandwidth
-                ch_rx2.sample_rate = self.sample_rate
-                ch_rx2.bandwidth = self.bandwidth
             self._tx_buffer = self._generate(int(self.sample_rate * 0.01))
-            if self._dual_channel:
-                self._rebuild_tx_dual_buffer()
 
     def set_waveform(self, waveform_type, **params):
         with self._lock:
@@ -185,27 +202,6 @@ class BladeRFDriver:
             if 'chirp_duration' in params:
                 self.chirp_duration = float(params['chirp_duration'])
             self._tx_buffer = self._generate(int(self.sample_rate * 0.01))
-            if self._dual_channel:
-                self._rebuild_tx_dual_buffer()
-
-    def _rebuild_tx_dual_buffer(self):
-        """Rebuild the interleaved TX1+TX2 buffer from self._tx_buffer.
-
-        Call whenever self._tx_buffer changes while dual TX may be running —
-        _tx_loop_dual re-reads _tx_dual_bytes every iteration (like _tx_loop does
-        with _tx_buffer), so this is what makes live waveform/rate changes actually
-        reach a running dual-channel TX instead of silently doing nothing.
-        """
-        buf = self._tx_buffer
-        n_samples = len(buf) // 2
-        tx_dual_buf = np.empty(len(buf) * 2, dtype=np.int16)
-        tx_dual_buf[0::4] = buf[0::2]  # TX1 I
-        tx_dual_buf[1::4] = buf[1::2]  # TX1 Q
-        tx_dual_buf[2::4] = buf[0::2]  # TX2 I
-        tx_dual_buf[3::4] = buf[1::2]  # TX2 Q
-        self._tx_dual_buf = tx_dual_buf
-        self._tx_dual_bytes = tx_dual_buf.tobytes()
-        self._tx_dual_n_samples = n_samples
 
     def _generate(self, num_samples):
         if self.waveform_type == 'chirp':
@@ -242,9 +238,12 @@ class BladeRFDriver:
     def start_tx(self):
         if self.tx_running:
             return
+        if self._last_layout == 'x2':
+            self.reopen()
         self._tx_buffer = self._generate(int(self.sample_rate * 0.01))
         self._tx_stop.clear()
         self.tx_running = True
+        self.device.enable_module(bladerf.CHANNEL_TX(0), True)
         self.device.sync_config(
             layout=ChannelLayout.TX_X1,
             fmt=Format.SC16_Q11,
@@ -253,7 +252,7 @@ class BladeRFDriver:
             num_transfers=8,
             stream_timeout=3500
         )
-        self.device.enable_module(bladerf.CHANNEL_TX(0), True)
+        self._last_layout = 'x1'
         self._tx_thread = threading.Thread(target=self._tx_loop, daemon=True)
         self._tx_thread.start()
 
@@ -284,27 +283,91 @@ class BladeRFDriver:
     def start_rx(self, callback, num_samples=16384):
         if self.rx_running:
             return
+        if self._last_layout == 'x2':
+            self.reopen()
         self._rx_stop.clear()
         self.rx_running = True
-        self.device.sync_config(
-            layout=ChannelLayout.RX_X1,
-            fmt=Format.SC16_Q11,
-            num_buffers=16,
-            buffer_size=4096,
-            num_transfers=8,
-            stream_timeout=3500
-        )
         self.device.enable_module(bladerf.CHANNEL_RX(0), True)
+
+        # Try metadata format first, fall back to regular format if not supported
+        try:
+            self.device.sync_config(
+                layout=ChannelLayout.RX_X1,
+                fmt=Format.SC16_Q11_META,  # Enable timestamp metadata
+                num_buffers=16,
+                buffer_size=4096,
+                num_transfers=8,
+                stream_timeout=3500
+            )
+            self._metadata_enabled = True
+            print("[bladerf] Using metadata format (timestamps enabled)")
+        except Exception as e:
+            print(f"[bladerf] Metadata format not supported, using regular format: {e}")
+            self.device.sync_config(
+                layout=ChannelLayout.RX_X1,
+                fmt=Format.SC16_Q11,  # Regular format without metadata
+                num_buffers=16,
+                buffer_size=4096,
+                num_transfers=8,
+                stream_timeout=3500
+            )
+            self._metadata_enabled = False
+
+        self._last_layout = 'x1'
         self._rx_thread = threading.Thread(target=self._rx_loop, args=(callback, num_samples), daemon=True)
         self._rx_thread.start()
 
     def _rx_loop(self, callback, num_samples):
-        buf = bytearray(num_samples * 2 * 2)
+        import struct
+
+        # Buffer size depends on metadata format
+        if self._metadata_enabled:
+            buf = bytearray(16 + num_samples * 2 * 2)  # 16 bytes metadata + samples
+        else:
+            buf = bytearray(num_samples * 2 * 2)  # Just samples
+
+        packet_count = 0
+        last_timestamp = None
+
         try:
             while not self._rx_stop.is_set():
                 self.device.sync_rx(buf, num_samples)
-                iq = np.frombuffer(buf, dtype=np.int16).copy()
-                callback(iq)
+
+                if self._metadata_enabled:
+                    # Parse metadata header (first 16 bytes)
+                    timestamp = struct.unpack('<Q', buf[0:8])[0]
+                    flags = struct.unpack('<I', buf[8:12])[0]
+                    status = struct.unpack('<I', buf[12:16])[0]
+
+                    packet_count += 1
+
+                    # Check for dropped samples
+                    if last_timestamp is not None:
+                        expected_gap = num_samples
+                        actual_gap = timestamp - last_timestamp
+                        if actual_gap != expected_gap:
+                            dropped = actual_gap - expected_gap
+                            print(f"[bladerf] WARNING: {dropped:,} samples dropped!")
+
+                    print(f"[bladerf] Packet #{packet_count} | timestamp: {timestamp:,} | status=0x{status:08x}")
+                    last_timestamp = timestamp
+
+                    # Extract I/Q samples (after metadata header)
+                    iq = np.frombuffer(buf[16:], dtype=np.int16).copy()
+
+                    # Generate per-sample timestamps
+                    per_sample_timestamps = np.arange(timestamp, timestamp + num_samples, dtype=np.uint64)
+
+                    # Try new callback signature
+                    try:
+                        callback(iq, per_sample_timestamps, flags, status)
+                    except TypeError:
+                        # Fall back to old signature
+                        callback(iq)
+                else:
+                    # No metadata - just extract samples
+                    iq = np.frombuffer(buf, dtype=np.int16).copy()
+                    callback(iq)
         except Exception as e:
             print(f"[bladerf] RX error: {e}")
         finally:
@@ -325,15 +388,22 @@ class BladeRFDriver:
 
     # -- Dual-channel TX/RX (used by SFCW engine for reference channel) --
 
-    def start_tx_dual(self):
-        """Start TX on both channels (TX1=antenna, TX2=reference cable)."""
+    def start_tx_dual(self, tx2_digital_scale=1.0):
+        """Start TX on both channels (TX1=antenna, TX2=reference cable).
+
+        tx2_digital_scale: scale factor for TX2 digital samples (0.0-1.0).
+        Use <1.0 to reduce TX2 output power without changing analog gain setting,
+        preserving phase-matched behavior with TX1 at the same gain register value.
+        """
         if self.tx_running:
             return
+        if self._last_layout == 'x1':
+            self.reopen()
         self._tx_buffer = self._generate(int(self.sample_rate * 0.01))
+        self._tx2_digital_scale = float(tx2_digital_scale)
         self._tx_stop.clear()
         self.tx_running = True
         self._dual_channel = True
-        self._rebuild_tx_dual_buffer()
         self.device.sync_config(
             layout=ChannelLayout.TX_X2,
             fmt=Format.SC16_Q11,
@@ -342,20 +412,30 @@ class BladeRFDriver:
             num_transfers=8,
             stream_timeout=3500
         )
+        self._last_layout = 'x2'
         self.device.enable_module(bladerf.CHANNEL_TX(0), True)
         self.device.enable_module(bladerf.CHANNEL_TX(1), True)
         self._tx_thread = threading.Thread(target=self._tx_loop_dual, daemon=True)
         self._tx_thread.start()
 
     def _tx_loop_dual(self):
-        """TX loop for dual channel — replays the interleaved buffer, re-read each
-        iteration (like _tx_loop) so live waveform/rate changes take effect."""
+        """TX loop for dual channel — interleaved TX1+TX2 samples."""
         try:
             while not self._tx_stop.is_set():
                 with self._lock:
-                    tx_bytes = self._tx_dual_bytes
-                    n_samples = self._tx_dual_n_samples
-                self.device.sync_tx(tx_bytes, n_samples)
+                    buf = self._tx_buffer
+                    scale2 = self._tx2_digital_scale
+                n_samples = len(buf) // 2
+                dual_buf = np.empty(len(buf) * 2, dtype=np.int16)
+                dual_buf[0::4] = buf[0::2]  # TX1 I
+                dual_buf[1::4] = buf[1::2]  # TX1 Q
+                if scale2 >= 1.0:
+                    dual_buf[2::4] = buf[0::2]  # TX2 I
+                    dual_buf[3::4] = buf[1::2]  # TX2 Q
+                else:
+                    dual_buf[2::4] = (buf[0::2].astype(np.float64) * scale2).astype(np.int16)
+                    dual_buf[3::4] = (buf[1::2].astype(np.float64) * scale2).astype(np.int16)
+                self.device.sync_tx(dual_buf.tobytes(), n_samples)
         except Exception as e:
             print(f"[bladerf] TX dual error: {e}")
         finally:
@@ -380,17 +460,21 @@ class BladeRFDriver:
         """Start RX on both channels. Callback receives (rx1_iq, rx2_iq) tuple."""
         if self.rx_running:
             return
+        if self._last_layout == 'x1':
+            self.reopen()
         self._rx_stop.clear()
         self.rx_running = True
         self._dual_channel = True
+        buf_size = max(4096, num_samples * 2)
         self.device.sync_config(
             layout=ChannelLayout.RX_X2,
             fmt=Format.SC16_Q11,
             num_buffers=16,
-            buffer_size=4096,
+            buffer_size=buf_size,
             num_transfers=8,
             stream_timeout=3500
         )
+        self._last_layout = 'x2'
         self.device.enable_module(bladerf.CHANNEL_RX(0), True)
         self.device.enable_module(bladerf.CHANNEL_RX(1), True)
         self._rx_thread = threading.Thread(target=self._rx_loop_dual, args=(callback, num_samples), daemon=True)
@@ -398,20 +482,23 @@ class BladeRFDriver:
 
     def _rx_loop_dual(self, callback, num_samples):
         """RX loop for dual channel — deinterleaves RX1 and RX2."""
-        # RX_X2: interleaved [RX1_I, RX1_Q, RX2_I, RX2_Q, ...]
-        # num_samples is per-channel, so total buffer is num_samples * 2 channels * 2 (I+Q) * 2 bytes
-        buf = bytearray(num_samples * 2 * 2 * 2)
+        # RX_X2: sync_rx(buf, N) captures N sample-pairs total.
+        # Each pair = [I1,Q1,I2,Q2] = 4 int16. Yields N samples per channel.
+        # Request num_samples*2 to get num_samples per channel after deinterleave.
+        rx_count = num_samples * 2
+        buf = bytearray(rx_count * 4 * 2)  # rx_count pairs × 4 int16 × 2 bytes
         try:
             while not self._rx_stop.is_set():
-                self.device.sync_rx(buf, num_samples)
+                self.device.sync_rx(buf, rx_count)
                 iq = np.frombuffer(buf, dtype=np.int16).copy()
-                # Deinterleave: [I1, Q1, I2, Q2, I1, Q1, I2, Q2, ...]
+                # iq has rx_count*4 int16 values: [I1,Q1,I2,Q2, I1,Q1,I2,Q2, ...]
+                # Each channel has rx_count values, but we want num_samples per ch
                 rx1 = np.empty(num_samples * 2, dtype=np.int16)
                 rx2 = np.empty(num_samples * 2, dtype=np.int16)
-                rx1[0::2] = iq[0::4]  # RX1 I
-                rx1[1::2] = iq[1::4]  # RX1 Q
-                rx2[0::2] = iq[2::4]  # RX2 I
-                rx2[1::2] = iq[3::4]  # RX2 Q
+                rx1[0::2] = iq[0::4][:num_samples]
+                rx1[1::2] = iq[1::4][:num_samples]
+                rx2[0::2] = iq[2::4][:num_samples]
+                rx2[1::2] = iq[3::4][:num_samples]
                 callback(rx1, rx2)
         except Exception as e:
             print(f"[bladerf] RX dual error: {e}")
