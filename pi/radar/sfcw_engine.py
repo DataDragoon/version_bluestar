@@ -615,28 +615,78 @@ class SFCWEngine:
 
         dropped_steps = 0
 
+        # Log detailed timing for first few, 50th, 150th, middle, and last steps
+        log_steps = {0, 1, 2, 3, 50, 150, num_steps // 2, num_steps - 1}
+        total_wait = settle_count + num_buffers
+
         for i in range(num_steps):
             if stop_event.is_set():
                 return None, 0
 
+            step_start = time.time()
             f = int(freqs[i])
+
+            # Send retune command to bladeRF
+            if i in log_steps:
+                _log_timing(f"  Step {i:3d} >>> SEND TO BLADERF",
+                           action="RX_retune+TX_retune",
+                           freq=f"{f/1e9:.3f}GHz",
+                           method="quick_tune" if use_qt else "full_tune")
+
+            cmd_start = time.time()
             if use_qt:
                 libbladeRF.bladerf_schedule_retune(dev_ptr, rx_ch, 0, f, qt_rx[i])
                 libbladeRF.bladerf_schedule_retune(dev_ptr, tx_ch, 0, f, qt_tx[i])
             else:
                 libbladeRF.bladerf_set_frequency(dev_ptr, tx_ch, f)
                 libbladeRF.bladerf_set_frequency(dev_ptr, rx_ch, f)
+            cmd_end = time.time()
+            cmd_duration = cmd_end - cmd_start
+
+            if i in log_steps:
+                _log_timing(f"  Step {i:3d} <<< USB ACK FROM BLADERF",
+                           status="retune_scheduled",
+                           time=_format_duration(cmd_duration))
+
+            # Wait for settling packets
+            if i in log_steps:
+                _log_timing(f"  Step {i:3d} >>> WAITING FOR SETTLE",
+                           waiting_for=f"{settle_count}_settling_packets")
+
+            wait_start = time.time()
+            last_pkt_time = wait_start
+
+            # Track overhead if logging this step
+            if i in log_steps:
+                overhead1 = wait_start - cmd_end
 
             with rx_cond:
                 target_seq = self._rx_seq + settle_count
+                pkt_num = 1
                 while self._rx_seq < target_seq:
                     if not rx_cond.wait(timeout=1.0):
                         break
+                    # Log each settling packet
+                    if i in log_steps and self._rx_seq <= target_seq:
+                        now = time.time()
+                        pkt_delta = now - last_pkt_time
+                        _log_timing(f"  Step {i:3d}      packet {pkt_num:2d}/{total_wait}",
+                                   type="settling",
+                                   dt=_format_duration(pkt_delta))
+                        last_pkt_time = now
+                        pkt_num += 1
+
+                if i in log_steps:
+                    settle_end = time.time()
+                    _log_timing(f"  Step {i:3d} <<< SETTLE DONE",
+                               time=_format_duration(settle_end - wait_start))
+                    _log_timing(f"  Step {i:3d} >>> CAPTURING {num_buffers} BUFFERS",
+                               note="noise_averaging")
 
                 sig_bufs = []
                 ref_bufs = []
                 last_seq = self._rx_seq
-                for _ in range(num_buffers):
+                for buf_idx in range(num_buffers):
                     while self._rx_seq <= last_seq:
                         if not rx_cond.wait(timeout=1.0):
                             break
@@ -645,6 +695,36 @@ class SFCWEngine:
                     last_seq = self._rx_seq
                     sig_bufs.append(self._rx_latest[0])
                     ref_bufs.append(self._rx_latest[1])
+
+                    # Log capture packets
+                    if i in log_steps:
+                        now = time.time()
+                        pkt_delta = now - last_pkt_time
+                        _log_timing(f"  Step {i:3d}      packet {pkt_num:2d}/{total_wait}",
+                                   type="CAPTURE",
+                                   buf=f"{buf_idx+1}/{num_buffers}",
+                                   dt=_format_duration(pkt_delta))
+                        last_pkt_time = now
+                        pkt_num += 1
+
+            wait_end = time.time()
+            wait_duration = wait_end - wait_start
+
+            if i in log_steps:
+                _log_timing(f"  Step {i:3d} <<< ALL PACKETS RECEIVED",
+                           total_time=_format_duration(wait_duration))
+
+            # Compute IQ at this frequency
+            if i in log_steps:
+                _log_timing(f"  Step {i:3d} >>> PROCESSING",
+                           operation="extract_IQ_via_ref_tone_mixing",
+                           num_buffers=len(sig_bufs))
+
+            compute_start = time.time()
+
+            # Track overhead if logging this step
+            if i in log_steps:
+                overhead2 = compute_start - wait_end
 
             if sig_bufs:
                 sig_arr = np.asarray(sig_bufs, dtype=np.float64)
@@ -655,14 +735,38 @@ class SFCWEngine:
                 h_reference[i] = ref_cplx.mean()
             else:
                 dropped_steps += 1
+            compute_end = time.time()
+            compute_duration = compute_end - compute_start
+
+            step_end = time.time()
+            step_total = step_end - step_start
+
+            if i in log_steps:
+                overhead3 = step_end - compute_end
+                overhead_total = overhead1 + overhead2 + overhead3
+                _log_timing(f"  Step {i:3d} <<< STEP COMPLETE",
+                           iq_valid="yes" if sig_bufs else "NO_PACKET",
+                           usb_ack=_format_duration(cmd_duration),
+                           pkt_wait=_format_duration(wait_duration),
+                           iq_compute=_format_duration(compute_duration),
+                           overhead=_format_duration(overhead_total),
+                           step_total=_format_duration(step_total))
+                # Add blank line between steps for readability
+                if i < num_steps - 1:
+                    print(flush=True)
 
             if progress_cb and i % 10 == 0:
                 progress_cb(i)
 
+        # Reference division (phase correction)
+        _log_separator('─')
+        _log_timing("REF DIVISION START", valid_steps=f"{num_steps-dropped_steps}/{num_steps}")
+        ref_start = time.time()
         ref_mag = np.abs(h_reference)
         valid = ref_mag > 1e-10
         h_cal = np.zeros(num_steps, dtype=np.complex128)
         h_cal[valid] = h_signal[valid] / h_reference[valid]
+        _log_timing("REF DIVISION DONE", time=_format_duration(time.time() - ref_start))
 
         return h_cal, dropped_steps
 
