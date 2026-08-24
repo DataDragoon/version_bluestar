@@ -354,12 +354,22 @@ class SFCWEngine:
 
     def _sweep_loop(self):
         try:
+            _log_separator('═')
+            _log_timing("SFCW ENGINE STARTING",
+                       note="Pi_initializing_bladeRF_for_sweeps")
+            loop_start = time.time()
+
             self._configure_hardware()
             self._start_tx_rx()
 
+            _log_timing("READY — ENTERING SWEEP LOOP",
+                       setup_time=_format_duration(time.time() - loop_start))
+
             while not self._stop_event.is_set():
                 if not self.driver.tx_running or not self.driver.rx_running:
-                    print("[sfcw] ERROR: TX/RX stream died unexpectedly")
+                    _log_timing("ERROR: TX/RX STREAM DIED",
+                               tx_running=self.driver.tx_running,
+                               rx_running=self.driver.rx_running)
                     if self._callback:
                         self._callback({'error': 'USB stream died — restart sweep'})
                     break
@@ -370,12 +380,15 @@ class SFCWEngine:
                     self._callback(range_profile)
 
         except Exception as e:
-            print(f"[sfcw] Sweep error: {e}")
+            _log_timing("SWEEP ERROR", error=str(e))
             if self._callback:
                 self._callback({'error': str(e)})
         finally:
             self._stop_tx_rx()
             self.running = False
+            _log_timing("SFCW ENGINE STOPPED",
+                       note="bladeRF_fully_idle")
+            _log_separator('═')
 
     def _ensure_master_quick_tune_table(self):
         """Generate the full-band quick_tune table once, covering QT_MASTER_START_FREQ..
@@ -405,16 +418,29 @@ class SFCWEngine:
 
         dev_ptr = self.driver.device.dev[0]
 
+        _log_separator('═')
+        _log_timing("QT TABLE BUILD START",
+                   num_profiles=len(freqs),
+                   range=f"{freqs[0]/1e9:.2f}-{freqs[-1]/1e9:.2f}GHz",
+                   step=f"{QT_MASTER_STEP/1e6:.0f}MHz")
+
         qt_rx = []
         qt_tx = []
+        table_start = time.time()
         for f in freqs:
             f_int = int(f)
+            freq_start = time.time()
             libbladeRF.bladerf_set_frequency(dev_ptr, bladerf.CHANNEL_RX(0), f_int)
             libbladeRF.bladerf_set_frequency(dev_ptr, bladerf.CHANNEL_TX(0), f_int)
+            set_freq_time = time.time() - freq_start
+
+            qt_start = time.time()
             qr = ffi.new('struct bladerf_quick_tune *')
             qt_val = ffi.new('struct bladerf_quick_tune *')
             rc_rx = libbladeRF.bladerf_get_quick_tune(dev_ptr, bladerf.CHANNEL_RX(0), qr)
             rc_tx = libbladeRF.bladerf_get_quick_tune(dev_ptr, bladerf.CHANNEL_TX(0), qt_val)
+            qt_get_time = time.time() - qt_start
+
             if rc_rx != 0 or rc_tx != 0:
                 raise RuntimeError(
                     f"bladerf_get_quick_tune failed at {f_int/1e6:.0f} MHz "
@@ -426,12 +452,22 @@ class SFCWEngine:
             qt_rx.append(qr)
             qt_tx.append(qt_val)
 
+            if len(qt_rx) in {1, 2, 3, 10, 50, 100, len(freqs)}:
+                _log_timing(f"  QT profile {len(qt_rx):3d}/{len(freqs)}",
+                           freq=f"{f_int/1e9:.3f}GHz",
+                           set_freq=_format_duration(set_freq_time),
+                           get_qt=_format_duration(qt_get_time),
+                           total=_format_duration(set_freq_time + qt_get_time))
+
+        table_duration = time.time() - table_start
         self._qt_master_freqs = freqs
         self._qt_master_rx = qt_rx
         self._qt_master_tx = qt_tx
-        print(f"[sfcw] Generated master quick_tune table: {len(freqs)} profiles "
-              f"({QT_MASTER_START_FREQ/1e9:.2f}-{QT_MASTER_STOP_FREQ/1e9:.2f} GHz, "
-              f"{QT_MASTER_STEP/1e6:.0f} MHz spacing)")
+        _log_timing("QT TABLE BUILD DONE",
+                   profiles=len(freqs),
+                   total_time=_format_duration(table_duration),
+                   per_profile=_format_duration(table_duration / len(freqs)))
+        _log_separator('═')
 
     def invalidate_quick_tune_table(self):
         """Drop the cached master table so it regenerates on next use.
@@ -465,20 +501,50 @@ class SFCWEngine:
         return freqs, None, None
 
     def _configure_hardware(self):
+        _log_separator('─')
+        _log_timing("CONFIGURE HW START")
+
+        t0 = time.time()
         self.driver.tx_gain = self.tx1_gain
         self.driver.rx_gain = self.rx1_gain
         self.driver.tx2_gain = self.tx2_gain
         self.driver.rx2_gain = self.rx2_gain
         self.driver.sample_rate = 10_000_000
         self.driver.bandwidth = 8_000_000
+        _log_timing("  >>> SET GAINS/RATE/BW TO BLADERF",
+                   tx1_gain=self.tx1_gain, rx1_gain=self.rx1_gain,
+                   tx2_gain=self.tx2_gain, rx2_gain=self.rx2_gain,
+                   sample_rate="10Msps", bandwidth="8MHz",
+                   time=_format_duration(time.time() - t0))
+
+        t1 = time.time()
         self.driver.set_waveform('cw', offset=100_000, amplitude=0.9)
+        _log_timing("  >>> SET WAVEFORM TO BLADERF",
+                   type="CW", offset="100kHz", amplitude=0.9,
+                   time=_format_duration(time.time() - t1))
+
         if self._use_quick_tune:
             self._ensure_master_quick_tune_table()
+
+        t2 = time.time()
         self.driver._configure_channels_dual()
+        _log_timing("  >>> CONFIGURE DUAL CHANNELS",
+                   time=_format_duration(time.time() - t2))
+
+        t3 = time.time()
         self.driver.set_tuning_mode_fpga()
         self._fpga_tuning = True
+        _log_timing("  >>> SET TUNING MODE FPGA",
+                   time=_format_duration(time.time() - t3))
+
+        _log_timing("CONFIGURE HW DONE",
+                   total=_format_duration(time.time() - t0))
+        _log_separator('─')
 
     def _start_tx_rx(self):
+        _log_separator('─')
+        _log_timing("START TX/RX STREAMING")
+
         self._rx_cond = threading.Condition()
         self._rx_latest = None
         self._rx_seq = 0
@@ -486,14 +552,35 @@ class SFCWEngine:
         t = np.arange(n, dtype=np.float64) / self.driver.sample_rate
         self._ref_tone = np.exp(-1j * 2 * np.pi * self.driver.cw_offset * t)
         self._ref_tone_scaled = self._ref_tone / 2047.0
-        self.driver.start_tx_dual()
-        self.driver.start_rx_dual(self._rx_capture, num_samples=n)
-        time.sleep(0.05)
 
-        # enable_module() resets gain state, so re-push after modules are enabled.
-        # driver.tx_gain/rx_gain/tx2_gain/rx2_gain were already synced from
-        # self.tx1_gain/rx1_gain/tx2_gain/rx2_gain in _configure_hardware().
+        t1 = time.time()
+        self.driver.start_tx_dual()
+        _log_timing("  >>> START TX DUAL TO BLADERF",
+                   action="sync_config(TX_X2)+enable_module(TX0,TX1)+spawn_tx_thread",
+                   time=_format_duration(time.time() - t1))
+
+        t2 = time.time()
+        self.driver.start_rx_dual(self._rx_capture, num_samples=n)
+        _log_timing("  >>> START RX DUAL TO BLADERF",
+                   action="sync_config(RX_X2)+enable_module(RX0,RX1)+spawn_rx_thread",
+                   buffer_size=n,
+                   time=_format_duration(time.time() - t2))
+
+        _log_timing("  ... WAITING 50ms FOR FIRST PACKETS",
+                   note="bladeRF_starts_streaming_USB_packets_now")
+        time.sleep(0.05)
+        _log_timing("  <<< FIRST PACKETS ARRIVED",
+                   rx_seq=self._rx_seq)
+
+        t3 = time.time()
         self.driver.reapply_dual_gains()
+        _log_timing("  >>> REAPPLY GAINS TO BLADERF",
+                   note="enable_module_resets_gain_state",
+                   time=_format_duration(time.time() - t3))
+
+        _log_timing("TX/RX STREAMING ACTIVE",
+                   note="bladeRF_continuously_sending_RX_packets_to_Pi")
+        _log_separator('─')
 
     def _apply_gains(self):
         dev_ptr = self.driver.device.dev[0]
@@ -504,10 +591,30 @@ class SFCWEngine:
         self._gains_dirty = False
 
     def _stop_tx_rx(self):
+        _log_separator('─')
+        _log_timing("STOP TX/RX STREAMING")
+
+        t1 = time.time()
         self.driver.stop_rx_dual()
+        _log_timing("  >>> STOP RX DUAL TO BLADERF",
+                   action="set_rx_stop_event+join_rx_thread+enable_module(RX0,RX1,False)",
+                   time=_format_duration(time.time() - t1),
+                   note="bladeRF_stops_sending_RX_packets")
+
+        t2 = time.time()
         self.driver.stop_tx_dual()
-        # Restore single-channel config so calib panel works after SFCW
+        _log_timing("  >>> STOP TX DUAL TO BLADERF",
+                   action="set_tx_stop_event+join_tx_thread+enable_module(TX0,TX1,False)",
+                   time=_format_duration(time.time() - t2),
+                   note="bladeRF_stops_TX")
+
+        t3 = time.time()
         self.driver._configure_channels()
+        _log_timing("  >>> RESTORE SINGLE-CHANNEL CONFIG",
+                   time=_format_duration(time.time() - t3))
+
+        _log_timing("TX/RX STREAMING STOPPED")
+        _log_separator('─')
 
 
 
@@ -663,10 +770,12 @@ class SFCWEngine:
             with rx_cond:
                 target_seq = self._rx_seq + settle_count
                 pkt_num = 1
+                all_bufs_sig = [] if i in log_steps else None
+                all_bufs_ref = [] if i in log_steps else None
                 while self._rx_seq < target_seq:
                     if not rx_cond.wait(timeout=1.0):
                         break
-                    # Log each settling packet
+                    # Log each settling packet and save it for comparison
                     if i in log_steps and self._rx_seq <= target_seq:
                         now = time.time()
                         pkt_delta = now - last_pkt_time
@@ -675,6 +784,8 @@ class SFCWEngine:
                                    dt=_format_duration(pkt_delta))
                         last_pkt_time = now
                         pkt_num += 1
+                        all_bufs_sig.append(np.array(self._rx_latest[0], copy=True))
+                        all_bufs_ref.append(np.array(self._rx_latest[1], copy=True))
 
                 if i in log_steps:
                     settle_end = time.time()
@@ -696,7 +807,7 @@ class SFCWEngine:
                     sig_bufs.append(self._rx_latest[0])
                     ref_bufs.append(self._rx_latest[1])
 
-                    # Log capture packets
+                    # Log capture packets and save for comparison
                     if i in log_steps:
                         now = time.time()
                         pkt_delta = now - last_pkt_time
@@ -706,6 +817,8 @@ class SFCWEngine:
                                    dt=_format_duration(pkt_delta))
                         last_pkt_time = now
                         pkt_num += 1
+                        all_bufs_sig.append(np.array(self._rx_latest[0], copy=True))
+                        all_bufs_ref.append(np.array(self._rx_latest[1], copy=True))
 
             wait_end = time.time()
             wait_duration = wait_end - wait_start
@@ -714,11 +827,38 @@ class SFCWEngine:
                 _log_timing(f"  Step {i:3d} <<< ALL PACKETS RECEIVED",
                            total_time=_format_duration(wait_duration))
 
-            # Compute IQ at this frequency
+                # Compare all 14 buffers side-by-side to check for duplicates
+                if all_bufs_sig and len(all_bufs_sig) >= 2:
+                    _log_timing(f"  Step {i:3d} ... BUFFER COMPARISON (all {len(all_bufs_sig)} buffers)")
+                    duplicates = []
+                    for a_idx in range(len(all_bufs_sig)):
+                        for b_idx in range(a_idx + 1, len(all_bufs_sig)):
+                            if np.array_equal(all_bufs_sig[a_idx], all_bufs_sig[b_idx]):
+                                duplicates.append((a_idx + 1, b_idx + 1))
+                    if duplicates:
+                        dup_str = ', '.join(f"{a}=={b}" for a, b in duplicates)
+                        _log_timing(f"  Step {i:3d}      *** DUPLICATES FOUND ***",
+                                   pairs=dup_str,
+                                   note="bladeRF_sent_same_data_twice")
+                    else:
+                        _log_timing(f"  Step {i:3d}      ALL UNIQUE",
+                                   note="all_{len(all_bufs_sig)}_buffers_are_different")
+                    # Also show how much each buffer differs from the last capture buffer
+                    last_buf = all_bufs_sig[-1].astype(np.float64)
+                    diffs = []
+                    for b_idx in range(len(all_bufs_sig) - 1):
+                        diff = np.mean(np.abs(all_bufs_sig[b_idx].astype(np.float64) - last_buf))
+                        diffs.append(f"{b_idx+1}:{diff:.1f}")
+                    _log_timing(f"  Step {i:3d}      MEAN_ABS_DIFF vs last",
+                               buffers=f"[{', '.join(diffs)}]",
+                               note="0=identical")
+
+            # Compute IQ at this frequency (Pi-only, no bladeRF communication)
             if i in log_steps:
-                _log_timing(f"  Step {i:3d} >>> PROCESSING",
+                _log_timing(f"  Step {i:3d} ... PROCESSING (Pi CPU)",
                            operation="extract_IQ_via_ref_tone_mixing",
-                           num_buffers=len(sig_bufs))
+                           num_buffers=len(sig_bufs),
+                           note="no_USB_here")
 
             compute_start = time.time()
 
