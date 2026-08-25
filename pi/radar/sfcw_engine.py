@@ -758,44 +758,57 @@ class SFCWEngine:
         log_steps = {0, 1, 2, 3, 50, 150, num_steps // 2, num_steps - 1}
         total_wait = settle_count + num_buffers
 
+        def issue_retune(idx):
+            """Send the RX+TX retune commands for freqs[idx].
+
+            Each call is one 16-byte packet out and one ACK back; timed and
+            rc-checked individually. Returns (rx_duration, tx_duration)."""
+            nonlocal retune_failures
+            f_r = int(freqs[idx])
+            t0 = time.time()
+            if use_qt:
+                rc1 = libbladeRF.bladerf_schedule_retune(dev_ptr, rx_ch, 0, f_r, qt_rx[idx])
+                t1 = time.time()
+                rc2 = libbladeRF.bladerf_schedule_retune(dev_ptr, tx_ch, 0, f_r, qt_tx[idx])
+            else:
+                rc1 = libbladeRF.bladerf_set_frequency(dev_ptr, rx_ch, f_r)
+                t1 = time.time()
+                rc2 = libbladeRF.bladerf_set_frequency(dev_ptr, tx_ch, f_r)
+            t2 = time.time()
+
+            if rc1 != 0 or rc2 != 0:
+                # Always logged, every step: that step's data is at the WRONG
+                # frequency (the Nios rejected the retune, e.g. full queue).
+                retune_failures += 1
+                _log_timing(f"  Step {idx:3d} *** RETUNE FAILED",
+                           freq=f"{f_r/1e9:.3f}GHz",
+                           rx_rc=rc1, tx_rc=rc2,
+                           note="step_data_captured_at_previous_frequency")
+
+            if idx in log_steps:
+                _log_timing(f"  Step {idx:3d} retune round-trips",
+                           freq=f"{f_r/1e9:.3f}GHz",
+                           method="quick_tune" if use_qt else "set_frequency",
+                           rx=_format_duration(t1 - t0),
+                           tx=_format_duration(t2 - t1),
+                           note="pipelined" if idx > 0 else "first_step")
+            return t1 - t0, t2 - t1
+
+        # Pipelining: step 0's retunes are issued here; every later step's are
+        # issued at the END of the previous step — right after its capture,
+        # before its compute — so the ~2-3ms of USB command latency overlaps
+        # the Pi-side NumPy work instead of extending the step. seq_at_retune
+        # snapshots the buffer counter at retune time so buffers arriving
+        # during the compute already count toward the next step's settling.
+        retune_rx_duration, retune_tx_duration = issue_retune(0)
+        seq_at_retune = self._rx_seq
+
         for i in range(num_steps):
             if stop_event.is_set():
                 return None, 0
 
             step_start = time.time()
             f = int(freqs[i])
-
-            # Send retune commands to bladeRF — each call is one 16-byte packet
-            # out and one ACK back; time and rc-check them individually.
-            cmd_start = time.time()
-            if use_qt:
-                rc1 = libbladeRF.bladerf_schedule_retune(dev_ptr, rx_ch, 0, f, qt_rx[i])
-                t_rx_done = time.time()
-                rc2 = libbladeRF.bladerf_schedule_retune(dev_ptr, tx_ch, 0, f, qt_tx[i])
-            else:
-                rc1 = libbladeRF.bladerf_set_frequency(dev_ptr, rx_ch, f)
-                t_rx_done = time.time()
-                rc2 = libbladeRF.bladerf_set_frequency(dev_ptr, tx_ch, f)
-            cmd_end = time.time()
-            retune_rx_duration = t_rx_done - cmd_start
-            retune_tx_duration = cmd_end - t_rx_done
-            cmd_duration = cmd_end - cmd_start
-
-            if rc1 != 0 or rc2 != 0:
-                # Always logged, every step: this step's data is at the WRONG
-                # frequency (the Nios rejected the retune, e.g. full queue).
-                retune_failures += 1
-                _log_timing(f"  Step {i:3d} *** RETUNE FAILED",
-                           freq=f"{f/1e9:.3f}GHz",
-                           rx_rc=rc1, tx_rc=rc2,
-                           note="step_data_captured_at_previous_frequency")
-
-            if i in log_steps:
-                _log_timing(f"  Step {i:3d} retune round-trips",
-                           freq=f"{f/1e9:.3f}GHz",
-                           method="quick_tune" if use_qt else "set_frequency",
-                           rx=_format_duration(retune_rx_duration),
-                           tx=_format_duration(retune_tx_duration))
 
             # Wait for settling packets (bladeRF streams continuously on EP0x81, Pi just counts arrivals)
             if i in log_steps:
@@ -808,7 +821,7 @@ class SFCWEngine:
 
 
             with rx_cond:
-                target_seq = self._rx_seq + settle_count
+                target_seq = seq_at_retune + settle_count
                 pkt_num = 1
                 all_bufs_sig = [] if i in log_steps else None
                 all_bufs_ref = [] if i in log_steps else None
@@ -864,6 +877,15 @@ class SFCWEngine:
 
             wait_end = time.time()
             wait_duration = wait_end - wait_start
+
+            # PIPELINE: this step's data is safely captured — send the NEXT
+            # step's retunes immediately, before this step's compute, so their
+            # USB latency runs concurrently with the NumPy work below.
+            if i + 1 < num_steps and not stop_event.is_set():
+                next_rx_dur, next_tx_dur = issue_retune(i + 1)
+                seq_at_retune = self._rx_seq
+            else:
+                next_rx_dur = next_tx_dur = 0.0
 
             if i in log_steps:
                 _log_timing(f"  Step {i:3d}      ALL {total_wait} EP0x81 BUFFERS DONE",
@@ -942,6 +964,10 @@ class SFCWEngine:
 
             if progress_cb and i % 10 == 0:
                 progress_cb(i)
+
+            # Hand over the pipelined retune timings measured after this
+            # step's capture — they belong to step i+1's summary line.
+            retune_rx_duration, retune_tx_duration = next_rx_dur, next_tx_dur
 
         # Reference division (phase correction)
         _log_separator('─')
