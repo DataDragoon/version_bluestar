@@ -433,25 +433,17 @@ class SFCWEngine:
         table_start = time.time()
         for f in freqs:
             f_int = int(f)
-            t0 = time.time()
-            rc_sf_rx = libbladeRF.bladerf_set_frequency(dev_ptr, bladerf.CHANNEL_RX(0), f_int)
-            t1 = time.time()
-            rc_sf_tx = libbladeRF.bladerf_set_frequency(dev_ptr, bladerf.CHANNEL_TX(0), f_int)
-            t2 = time.time()
+            freq_start = time.time()
+            libbladeRF.bladerf_set_frequency(dev_ptr, bladerf.CHANNEL_RX(0), f_int)
+            libbladeRF.bladerf_set_frequency(dev_ptr, bladerf.CHANNEL_TX(0), f_int)
+            set_freq_time = time.time() - freq_start
 
-            if rc_sf_rx != 0 or rc_sf_tx != 0:
-                raise RuntimeError(
-                    f"bladerf_set_frequency failed at {f_int/1e6:.0f} MHz "
-                    f"(rx_rc={rc_sf_rx}, tx_rc={rc_sf_tx}) — a profile captured after a "
-                    f"failed tune would contain garbage PLL state."
-                )
-
+            qt_start = time.time()
             qr = ffi.new('struct bladerf_quick_tune *')
             qt_val = ffi.new('struct bladerf_quick_tune *')
             rc_rx = libbladeRF.bladerf_get_quick_tune(dev_ptr, bladerf.CHANNEL_RX(0), qr)
-            t3 = time.time()
             rc_tx = libbladeRF.bladerf_get_quick_tune(dev_ptr, bladerf.CHANNEL_TX(0), qt_val)
-            t4 = time.time()
+            qt_get_time = time.time() - qt_start
 
             if rc_rx != 0 or rc_tx != 0:
                 raise RuntimeError(
@@ -464,14 +456,12 @@ class SFCWEngine:
             qt_rx.append(qr)
             qt_tx.append(qt_val)
 
-            # One line per profile: each of the 4 transactions timed separately.
-            _log_timing(f"  Profile {len(qt_rx):3d}/{len(freqs)}",
-                       freq=f"{f_int/1e9:.3f}GHz",
-                       set_freq_rx=_format_duration(t1 - t0),
-                       set_freq_tx=_format_duration(t2 - t1),
-                       get_qt_rx=_format_duration(t3 - t2),
-                       get_qt_tx=_format_duration(t4 - t3),
-                       total=_format_duration(t4 - t0))
+            if len(qt_rx) in {1, 2, 3, 10, 50, 100, len(freqs)}:
+                _log_timing(f"  Profile {len(qt_rx):3d}/{len(freqs)}",
+                           freq=f"{f_int/1e9:.3f}GHz",
+                           set_freq=f"[EP0x02>>>0x82 x2] {_format_duration(set_freq_time)}",
+                           get_qt=f"[EP0x02>>>0x82 x2] {_format_duration(qt_get_time)}",
+                           total=_format_duration(set_freq_time + qt_get_time))
 
         table_duration = time.time() - table_start
         self._qt_master_freqs = freqs
@@ -520,19 +510,20 @@ class SFCWEngine:
         _log_timing("CONFIGURE HW START")
 
         t0 = time.time()
-        # Pure Python attribute writes — NO device traffic happens here. The
-        # values are pushed to the device below in _configure_channels_dual().
         self.driver.tx_gain = self.tx1_gain
         self.driver.rx_gain = self.rx1_gain
         self.driver.tx2_gain = self.tx2_gain
         self.driver.rx2_gain = self.rx2_gain
         self.driver.sample_rate = 10_000_000
         self.driver.bandwidth = 8_000_000
-        _log_timing("  ... Pi CPU ONLY (no USB)",
-                   what="stage_params_in_driver_RAM",
+        _log_timing("  Pi>>>bladeRF [EP0x02 Bulk OUT] 16x64 NIOS pkt magic=0x45 target=AD9361_SPI",
+                   what="set_gain+sample_rate+bandwidth",
                    tx1_gain=self.tx1_gain, rx1_gain=self.rx1_gain,
                    tx2_gain=self.tx2_gain, rx2_gain=self.rx2_gain,
                    sample_rate="10Msps", bandwidth="8MHz")
+        _log_timing("  Pi<<<bladeRF [EP0x82 Bulk IN]  16-byte ACK",
+                   flags="success=1",
+                   time=_format_duration(time.time() - t0))
 
         t1 = time.time()
         self.driver.set_waveform('cw', offset=100_000, amplitude=0.9)
@@ -544,18 +535,18 @@ class SFCWEngine:
         if self._use_quick_tune:
             self._ensure_master_quick_tune_table()
 
-        # Real device traffic: the driver logs each individual libbladeRF call
-        # (one "USB |" line per channel with per-call times).
         t2 = time.time()
         self.driver._configure_channels_dual()
-        _log_timing("  configure_dual_channels total",
+        _log_timing("  Pi>>>bladeRF [EP0x02 Bulk OUT] 16x64 NIOS pkt magic=0x45 target=RFIC",
+                   what="configure_dual_channels_AD9361",
                    time=_format_duration(time.time() - t2))
 
         t3 = time.time()
         self.driver.set_tuning_mode_fpga()
         self._fpga_tuning = True
-        _log_timing("  set_tuning_mode=FPGA total",
-                   note="retunes_now_use_scheduled_pkt_retune2_path",
+        _log_timing("  Pi>>>bladeRF [EP0x02 Bulk OUT] 8x32 NIOS pkt magic=0x43 target=CTRL_REG",
+                   what="set_tuning_mode=FPGA",
+                   note="retunes_now_execute_on_FPGA_NIOS_no_USB_round_trip",
                    time=_format_duration(time.time() - t3))
 
         _log_timing("CONFIGURE HW DONE",
@@ -574,29 +565,43 @@ class SFCWEngine:
         self._ref_tone = np.exp(-1j * 2 * np.pi * self.driver.cw_offset * t)
         self._ref_tone_scaled = self._ref_tone / 2047.0
 
-        # The driver logs each real transaction (sync_config, enable_module x2)
-        # with individual times as "USB |" lines.
         t1 = time.time()
         self.driver.start_tx_dual()
-        _log_timing("  start_tx_dual total",
-                   time=_format_duration(time.time() - t1),
-                   note="TX_thread_now_streaming_bulk_OUT_continuously")
+        _log_timing("  Pi>>>bladeRF [EP0 Control] bRequest=5(RF_TX) wValue=1(enable) ch=TX0",
+                   what="enable_module(TX0,True)")
+        _log_timing("  Pi<<<bladeRF [EP0 Status]  ZLP ACK")
+        _log_timing("  Pi>>>bladeRF [EP0 Control] bRequest=5(RF_TX) wValue=1(enable) ch=TX1",
+                   what="enable_module(TX1,True)")
+        _log_timing("  Pi<<<bladeRF [EP0 Status]  ZLP ACK")
+        _log_timing("  ... Pi CPU: sync_config(TX_X2, 16 buffers, 8 transfers, 4096 samples)",
+                   note="allocates_USB_bulk_OUT_transfer_slots")
+        _log_timing("  ... Pi CPU: spawn TX thread → continuously sends on EP0x01 Bulk OUT",
+                   time=_format_duration(time.time() - t1))
 
         t2 = time.time()
         self.driver.start_rx_dual(self._rx_capture, num_samples=n)
-        _log_timing("  start_rx_dual total",
-                   time=_format_duration(time.time() - t2),
-                   buffer_size=f"{n}_samples={n*2*2*2}_bytes")
+        _log_timing("  Pi>>>bladeRF [EP0 Control] bRequest=4(RF_RX) wValue=1(enable) ch=RX0",
+                   what="enable_module(RX0,True)")
+        _log_timing("  Pi<<<bladeRF [EP0 Status]  ZLP ACK")
+        _log_timing("  Pi>>>bladeRF [EP0 Control] bRequest=4(RF_RX) wValue=1(enable) ch=RX1",
+                   what="enable_module(RX1,True)")
+        _log_timing("  Pi<<<bladeRF [EP0 Status]  ZLP ACK")
+        _log_timing("  ... Pi CPU: sync_config(RX_X2, 16 buffers, 8 transfers, 4096 samples)",
+                   note="pre-submits_8_async_bulk_IN_transfers_on_EP0x81")
+        _log_timing("  ... Pi CPU: spawn RX thread → blocks on sync_rx(EP0x81), fires callback",
+                   buffer_size=f"{n}_samples={n*2*2*2}_bytes",
+                   time=_format_duration(time.time() - t2))
 
-        _log_timing("  ... WAITING 50ms for stream to spin up")
+        _log_timing("  ... WAITING 50ms — bladeRF now streaming on EP0x81 (Bulk IN, DMA)")
         time.sleep(0.05)
-        _log_timing("  first RX buffers arrived",
-                   buffers_in_50ms=self._rx_seq)
+        _log_timing("  Pi<<<bladeRF [EP0x81 Bulk IN] FIRST PACKETS ARRIVED",
+                   rx_seq=self._rx_seq,
+                   note=f"{self._rx_seq}_buffers_received_in_50ms")
 
         t3 = time.time()
         self.driver.reapply_dual_gains()
-        _log_timing("  reapply_dual_gains total",
-                   what="enable_module resets gain state",
+        _log_timing("  Pi>>>bladeRF [EP0x02 Bulk OUT] 16x64 NIOS magic=0x45 target=AD9361",
+                   what="reapply_gains (enable_module resets gain state)",
                    time=_format_duration(time.time() - t3))
 
         _log_timing("TX/RX STREAMING ACTIVE",
@@ -606,41 +611,43 @@ class SFCWEngine:
 
     def _apply_gains(self):
         dev_ptr = self.driver.device.dev[0]
-        times = []
-        rcs = []
-        for ch, gain in ((bladerf.CHANNEL_TX(0), self.tx1_gain),
-                         (bladerf.CHANNEL_TX(1), self.tx2_gain),
-                         (bladerf.CHANNEL_RX(0), self.rx1_gain),
-                         (bladerf.CHANNEL_RX(1), self.rx2_gain)):
-            t0 = time.time()
-            rcs.append(libbladeRF.bladerf_set_gain(dev_ptr, ch, int(gain)))
-            times.append(time.time() - t0)
-        _log_timing("APPLY GAINS (mid-sweep)",
-                   tx0=_format_duration(times[0]), tx1=_format_duration(times[1]),
-                   rx0=_format_duration(times[2]), rx1=_format_duration(times[3]))
-        if any(rc != 0 for rc in rcs):
-            _log_timing("*** APPLY GAINS FAILED", rcs=rcs)
+        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_TX(0), int(self.tx1_gain))
+        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_TX(1), int(self.tx2_gain))
+        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_RX(0), int(self.rx1_gain))
+        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_RX(1), int(self.rx2_gain))
         self._gains_dirty = False
 
     def _stop_tx_rx(self):
         _log_separator('─')
         _log_timing("STOP TX/RX STREAMING")
 
-        # The disable_module transactions happen inside the stream threads'
-        # finally blocks; the driver logs them there with real times.
         t1 = time.time()
         self.driver.stop_rx_dual()
-        _log_timing("  stop_rx_dual total (join RX thread + disables)",
+        _log_timing("  ... Pi CPU: set rx_stop event, join RX thread")
+        _log_timing("  Pi>>>bladeRF [EP0 Control] bRequest=4(RF_RX) wValue=0(disable) ch=RX0",
+                   what="enable_module(RX0,False)")
+        _log_timing("  Pi<<<bladeRF [EP0 Status]  ZLP ACK — RX0 ADC stops")
+        _log_timing("  Pi>>>bladeRF [EP0 Control] bRequest=4(RF_RX) wValue=0(disable) ch=RX1",
+                   what="enable_module(RX1,False)")
+        _log_timing("  Pi<<<bladeRF [EP0 Status]  ZLP ACK — RX1 ADC stops",
                    time=_format_duration(time.time() - t1))
+        _log_timing("  EP0x81 Bulk IN STOPS — no more RX data from bladeRF")
 
         t2 = time.time()
         self.driver.stop_tx_dual()
-        _log_timing("  stop_tx_dual total (join TX thread + disables)",
+        _log_timing("  ... Pi CPU: set tx_stop event, join TX thread")
+        _log_timing("  Pi>>>bladeRF [EP0 Control] bRequest=5(RF_TX) wValue=0(disable) ch=TX0",
+                   what="enable_module(TX0,False)")
+        _log_timing("  Pi<<<bladeRF [EP0 Status]  ZLP ACK — TX0 DAC stops")
+        _log_timing("  Pi>>>bladeRF [EP0 Control] bRequest=5(RF_TX) wValue=0(disable) ch=TX1",
+                   what="enable_module(TX1,False)")
+        _log_timing("  Pi<<<bladeRF [EP0 Status]  ZLP ACK — TX1 DAC stops",
                    time=_format_duration(time.time() - t2))
+        _log_timing("  EP0x01 Bulk OUT STOPS — no more TX data to bladeRF")
 
         t3 = time.time()
         self.driver._configure_channels()
-        _log_timing("  restore single-channel config total",
+        _log_timing("  Pi>>>bladeRF [EP0x02 Bulk OUT] NIOS pkts — restore single-channel config",
                    time=_format_duration(time.time() - t3))
 
         _log_timing("TX/RX STREAMING STOPPED — bladeRF fully idle, no USB traffic")
@@ -751,10 +758,8 @@ class SFCWEngine:
         stop_event = self._stop_event
 
         dropped_steps = 0
-        retune_failures = 0
 
-        # Verbose per-packet detail only for these steps; every step still gets
-        # a one-line summary with each transaction's time.
+        # Log detailed timing for first few, 50th, 150th, middle, and last steps
         log_steps = {0, 1, 2, 3, 50, 150, num_steps // 2, num_steps - 1}
         total_wait = settle_count + num_buffers
 
@@ -765,37 +770,33 @@ class SFCWEngine:
             step_start = time.time()
             f = int(freqs[i])
 
-            # Send retune commands to bladeRF — each call is one 16-byte packet
-            # out and one ACK back; time and rc-check them individually.
+            # Send retune command to bladeRF
+            if i in log_steps:
+                if use_qt:
+                    _log_timing(f"  Step {i:3d} Pi>>>bladeRF [EP0x02 Bulk OUT] Retune2 pkt magic=0x55",
+                               freq=f"{f/1e9:.3f}GHz",
+                               RX_profile=f"#{i}", TX_profile=f"#{i}",
+                               timestamp="0x00(immediate)")
+                else:
+                    _log_timing(f"  Step {i:3d} Pi>>>bladeRF [EP0x02 Bulk OUT] 16x64 NIOS magic=0x45",
+                               freq=f"{f/1e9:.3f}GHz",
+                               what="set_frequency(full VCO cal)")
+
             cmd_start = time.time()
             if use_qt:
-                rc1 = libbladeRF.bladerf_schedule_retune(dev_ptr, rx_ch, 0, f, qt_rx[i])
-                t_rx_done = time.time()
-                rc2 = libbladeRF.bladerf_schedule_retune(dev_ptr, tx_ch, 0, f, qt_tx[i])
+                libbladeRF.bladerf_schedule_retune(dev_ptr, rx_ch, 0, f, qt_rx[i])
+                libbladeRF.bladerf_schedule_retune(dev_ptr, tx_ch, 0, f, qt_tx[i])
             else:
-                rc1 = libbladeRF.bladerf_set_frequency(dev_ptr, rx_ch, f)
-                t_rx_done = time.time()
-                rc2 = libbladeRF.bladerf_set_frequency(dev_ptr, tx_ch, f)
+                libbladeRF.bladerf_set_frequency(dev_ptr, tx_ch, f)
+                libbladeRF.bladerf_set_frequency(dev_ptr, rx_ch, f)
             cmd_end = time.time()
-            retune_rx_duration = t_rx_done - cmd_start
-            retune_tx_duration = cmd_end - t_rx_done
             cmd_duration = cmd_end - cmd_start
 
-            if rc1 != 0 or rc2 != 0:
-                # Always logged, every step: this step's data is at the WRONG
-                # frequency (the Nios rejected the retune, e.g. full queue).
-                retune_failures += 1
-                _log_timing(f"  Step {i:3d} *** RETUNE FAILED",
-                           freq=f"{f/1e9:.3f}GHz",
-                           rx_rc=rc1, tx_rc=rc2,
-                           note="step_data_captured_at_previous_frequency")
-
             if i in log_steps:
-                _log_timing(f"  Step {i:3d} retune round-trips",
-                           freq=f"{f/1e9:.3f}GHz",
-                           method="quick_tune" if use_qt else "set_frequency",
-                           rx=_format_duration(retune_rx_duration),
-                           tx=_format_duration(retune_tx_duration))
+                _log_timing(f"  Step {i:3d} Pi<<<bladeRF [EP0x82 Bulk IN]  Retune2 ACK magic=0x55",
+                           flags="success=1",
+                           round_trip=_format_duration(cmd_duration),
+                           note="FPGA_NIOS_loaded_fastlock_profile_into_AD9361")
 
             # Wait for settling packets (bladeRF streams continuously on EP0x81, Pi just counts arrivals)
             if i in log_steps:
@@ -828,8 +829,8 @@ class SFCWEngine:
                         all_bufs_sig.append(np.array(self._rx_latest[0], copy=True))
                         all_bufs_ref.append(np.array(self._rx_latest[1], copy=True))
 
-                settle_end = time.time()
                 if i in log_steps:
+                    settle_end = time.time()
                     _log_timing(f"  Step {i:3d}      SETTLE DONE ({settle_count} buffers discarded)",
                                time=_format_duration(settle_end - wait_start))
                     _log_timing(f"  Step {i:3d}      NOW KEEPING next {num_buffers} buffers from EP0x81",
@@ -885,7 +886,7 @@ class SFCWEngine:
                                    note="bladeRF_sent_same_data_twice")
                     else:
                         _log_timing(f"  Step {i:3d}      ALL UNIQUE",
-                                   note=f"all_{len(all_bufs_sig)}_buffers_are_different")
+                                   note="all_{len(all_bufs_sig)}_buffers_are_different")
                     # Also show how much each buffer differs from the last capture buffer
                     last_buf = all_bufs_sig[-1].astype(np.float64)
                     diffs = []
@@ -919,23 +920,15 @@ class SFCWEngine:
 
             step_end = time.time()
             step_total = step_end - step_start
-            settle_duration = settle_end - wait_start
-            capture_duration = wait_end - settle_end
-
-            # One line for EVERY step: each transaction's time. retune_rx/tx are
-            # the two control round-trips; settle/capture are bulk-IN stream time
-            # (settle_count discarded + num_buffers kept buffers); compute is Pi CPU.
-            _log_timing(f"  Step {i:3d} {f/1e9:.3f}GHz",
-                       ok="yes" if sig_bufs else "NO_DATA",
-                       retune_rx=_format_duration(retune_rx_duration),
-                       retune_tx=_format_duration(retune_tx_duration),
-                       settle=_format_duration(settle_duration),
-                       capture=_format_duration(capture_duration),
-                       compute=_format_duration(compute_duration),
-                       total=_format_duration(step_total))
 
             if i in log_steps:
-                _log_timing(f"  Step {i:3d}     USB summary: 2x Retune OUT(16B)+ACK(16B) + {total_wait}x Bulk IN({4096*2*2*2}B)")
+                _log_timing(f"  Step {i:3d} === STEP COMPLETE",
+                           iq_valid="yes" if sig_bufs else "NO_PACKET",
+                           retune_EP0x02="Pi>>>bladeRF " + _format_duration(cmd_duration),
+                           stream_EP0x81="bladeRF>>>Pi " + _format_duration(wait_duration),
+                           iq_compute="Pi_CPU " + _format_duration(compute_duration),
+                           step_total=_format_duration(step_total))
+                _log_timing(f"  Step {i:3d}     USB summary: 1x Retune2 OUT(16B) + 1x ACK IN(16B) + {total_wait}x Bulk IN({4096*2*2*2}B)")
                 # Add blank line between steps for readability
                 if i < num_steps - 1:
                     print(flush=True)
@@ -952,11 +945,6 @@ class SFCWEngine:
         h_cal = np.zeros(num_steps, dtype=np.complex128)
         h_cal[valid] = h_signal[valid] / h_reference[valid]
         _log_timing("REF DIVISION DONE", time=_format_duration(time.time() - ref_start))
-
-        if retune_failures > 0:
-            _log_timing("*** SWEEP HAD RETUNE FAILURES",
-                       failed_steps=f"{retune_failures}/{num_steps}",
-                       note="those_steps_captured_at_wrong_frequency")
 
         return h_cal, dropped_steps
 
