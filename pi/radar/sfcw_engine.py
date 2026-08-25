@@ -878,6 +878,13 @@ class SFCWEngine:
             wait_end = time.time()
             wait_duration = wait_end - wait_start
 
+            # Printed BEFORE the pipelined retunes so log line order matches
+            # transaction order (buffers done -> next retune -> compute).
+            if i in log_steps:
+                _log_timing(f"  Step {i:3d}      ALL {total_wait} EP0x81 BUFFERS DONE",
+                           total_time=_format_duration(wait_duration),
+                           data=f"{total_wait*4096*2*2*2}B_received_from_bladeRF")
+
             # PIPELINE: this step's data is safely captured — send the NEXT
             # step's retunes immediately, before this step's compute, so their
             # USB latency runs concurrently with the NumPy work below.
@@ -888,10 +895,6 @@ class SFCWEngine:
                 next_rx_dur = next_tx_dur = 0.0
 
             if i in log_steps:
-                _log_timing(f"  Step {i:3d}      ALL {total_wait} EP0x81 BUFFERS DONE",
-                           total_time=_format_duration(wait_duration),
-                           data=f"{total_wait*4096*2*2*2}B_received_from_bladeRF")
-
                 # Compare all 14 buffers side-by-side to check for duplicates
                 if all_bufs_sig and len(all_bufs_sig) >= 2:
                     _log_timing(f"  Step {i:3d} ... BUFFER COMPARISON (all {len(all_bufs_sig)} buffers)")
