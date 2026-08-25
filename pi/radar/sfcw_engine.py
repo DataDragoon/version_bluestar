@@ -765,16 +765,24 @@ class SFCWEngine:
             rc-checked individually. Returns (rx_duration, tx_duration)."""
             nonlocal retune_failures
             f_r = int(freqs[idx])
+            # Minimal send/ACK markers: the line's own wall-clock prefix IS the
+            # measurement — printed at the exact moment of each event.
+            _log_timing(f"  Step {idx:3d} >>> RX retune CMD SENT", freq=f"{f_r/1e9:.3f}GHz")
             t0 = time.time()
             if use_qt:
                 rc1 = libbladeRF.bladerf_schedule_retune(dev_ptr, rx_ch, 0, f_r, qt_rx[idx])
-                t1 = time.time()
-                rc2 = libbladeRF.bladerf_schedule_retune(dev_ptr, tx_ch, 0, f_r, qt_tx[idx])
             else:
                 rc1 = libbladeRF.bladerf_set_frequency(dev_ptr, rx_ch, f_r)
-                t1 = time.time()
+            t1 = time.time()
+            _log_timing(f"  Step {idx:3d} <<< RX retune ACK RECEIVED")
+            _log_timing(f"  Step {idx:3d} >>> TX retune CMD SENT")
+            t_tx = time.time()
+            if use_qt:
+                rc2 = libbladeRF.bladerf_schedule_retune(dev_ptr, tx_ch, 0, f_r, qt_tx[idx])
+            else:
                 rc2 = libbladeRF.bladerf_set_frequency(dev_ptr, tx_ch, f_r)
             t2 = time.time()
+            _log_timing(f"  Step {idx:3d} <<< TX retune ACK RECEIVED")
 
             if rc1 != 0 or rc2 != 0:
                 # Always logged, every step: that step's data is at the WRONG
@@ -785,14 +793,7 @@ class SFCWEngine:
                            rx_rc=rc1, tx_rc=rc2,
                            note="step_data_captured_at_previous_frequency")
 
-            if idx in log_steps:
-                _log_timing(f"  Step {idx:3d} retune round-trips",
-                           freq=f"{f_r/1e9:.3f}GHz",
-                           method="quick_tune" if use_qt else "set_frequency",
-                           rx=_format_duration(t1 - t0),
-                           tx=_format_duration(t2 - t1),
-                           note="pipelined" if idx > 0 else "first_step")
-            return t1 - t0, t2 - t1
+            return t1 - t0, t2 - t_tx
 
         # Pipelining: step 0's retunes are issued here; every later step's are
         # issued at the END of the previous step — right after its capture,
