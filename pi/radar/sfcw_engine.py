@@ -807,9 +807,6 @@ class SFCWEngine:
             wait_start = time.time()
             last_pkt_time = wait_start
 
-            # Track overhead if logging this step
-            if i in log_steps:
-                overhead1 = wait_start - cmd_end
 
             with rx_cond:
                 target_seq = self._rx_seq + settle_count
@@ -909,10 +906,6 @@ class SFCWEngine:
 
             compute_start = time.time()
 
-            # Track overhead if logging this step
-            if i in log_steps:
-                overhead2 = compute_start - wait_end
-
             if sig_bufs:
                 sig_arr = np.asarray(sig_bufs, dtype=np.float64)
                 ref_arr = np.asarray(ref_bufs, dtype=np.float64)
@@ -929,14 +922,11 @@ class SFCWEngine:
             step_total = step_end - step_start
 
             if i in log_steps:
-                overhead3 = step_end - compute_end
-                overhead_total = overhead1 + overhead2 + overhead3
                 _log_timing(f"  Step {i:3d} === STEP COMPLETE",
                            iq_valid="yes" if sig_bufs else "NO_PACKET",
                            retune_EP0x02="Pi>>>bladeRF " + _format_duration(cmd_duration),
                            stream_EP0x81="bladeRF>>>Pi " + _format_duration(wait_duration),
                            iq_compute="Pi_CPU " + _format_duration(compute_duration),
-                           overhead=_format_duration(overhead_total),
                            step_total=_format_duration(step_total))
                 _log_timing(f"  Step {i:3d}     USB summary: 1x Retune2 OUT(16B) + 1x ACK IN(16B) + {total_wait}x Bulk IN({4096*2*2*2}B)")
                 # Add blank line between steps for readability
