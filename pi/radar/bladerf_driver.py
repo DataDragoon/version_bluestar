@@ -5,10 +5,37 @@ import time
 import numpy as np
 import bladerf
 from bladerf._bladerf import ChannelLayout, Format, ffi, libbladeRF
+from datetime import datetime
 
 SCALE = 2047
 MGC = libbladeRF.BLADERF_GAIN_MGC
 TUNING_MODE_FPGA = libbladeRF.BLADERF_TUNING_MODE_FPGA
+
+
+def _fmt_dur(seconds):
+    if seconds < 0.001:
+        return f"{seconds*1000000:.0f}µs"
+    elif seconds < 1:
+        return f"{seconds*1000:.1f}ms"
+    return f"{seconds:.3f}s"
+
+
+def _log_usb(event, **details):
+    """One line per real device interaction, timestamped at the moment it finished."""
+    ts = datetime.now().strftime('%H:%M:%S.%f')
+    detail_str = ' '.join(f'{k}={v}' for k, v in details.items())
+    print(f"[{ts}] USB  | {event:<30} {detail_str}", flush=True)
+
+
+def _timed(label, fn, *args):
+    """Run one libbladeRF call, return (rc, duration). Logs ONLY failures here;
+    callers aggregate the durations of successful calls into one line."""
+    t0 = time.time()
+    rc = fn(*args)
+    dt = time.time() - t0
+    if rc is not None and rc != 0:
+        _log_usb(f"*** {label} FAILED", rc=rc, time=_fmt_dur(dt))
+    return rc, dt
 
 
 class BladeRFDriver:
@@ -84,15 +111,32 @@ class BladeRFDriver:
         for ch_idx in range(2):
             tx_ch = bladerf.CHANNEL_TX(ch_idx)
             rx_ch = bladerf.CHANNEL_RX(ch_idx)
-            libbladeRF.bladerf_set_frequency(dev_ptr, tx_ch, int(self.center_freq))
-            libbladeRF.bladerf_set_sample_rate(dev_ptr, tx_ch, int(self.sample_rate), ffi.NULL)
-            libbladeRF.bladerf_set_bandwidth(dev_ptr, tx_ch, int(self.bandwidth), ffi.NULL)
-            libbladeRF.bladerf_set_frequency(dev_ptr, rx_ch, int(self.center_freq))
-            libbladeRF.bladerf_set_sample_rate(dev_ptr, rx_ch, int(self.sample_rate), ffi.NULL)
-            libbladeRF.bladerf_set_bandwidth(dev_ptr, rx_ch, int(self.bandwidth), ffi.NULL)
-            libbladeRF.bladerf_set_gain_mode(dev_ptr, rx_ch, MGC)
-            libbladeRF.bladerf_set_gain(dev_ptr, rx_ch, gains_rx[ch_idx])
-            libbladeRF.bladerf_set_gain(dev_ptr, tx_ch, gains_tx[ch_idx])
+            # Each call below is one (or more) control transactions to the device:
+            # libusb -> FX3 UART -> Nios packet -> AD9361 SPI. Time each one.
+            _, t_tf = _timed(f"TX{ch_idx} set_frequency", libbladeRF.bladerf_set_frequency,
+                             dev_ptr, tx_ch, int(self.center_freq))
+            _, t_ts = _timed(f"TX{ch_idx} set_sample_rate", libbladeRF.bladerf_set_sample_rate,
+                             dev_ptr, tx_ch, int(self.sample_rate), ffi.NULL)
+            _, t_tb = _timed(f"TX{ch_idx} set_bandwidth", libbladeRF.bladerf_set_bandwidth,
+                             dev_ptr, tx_ch, int(self.bandwidth), ffi.NULL)
+            _log_usb(f"cfg TX{ch_idx}", set_freq=_fmt_dur(t_tf),
+                     set_rate=_fmt_dur(t_ts), set_bw=_fmt_dur(t_tb))
+            _, t_rf = _timed(f"RX{ch_idx} set_frequency", libbladeRF.bladerf_set_frequency,
+                             dev_ptr, rx_ch, int(self.center_freq))
+            _, t_rs = _timed(f"RX{ch_idx} set_sample_rate", libbladeRF.bladerf_set_sample_rate,
+                             dev_ptr, rx_ch, int(self.sample_rate), ffi.NULL)
+            _, t_rb = _timed(f"RX{ch_idx} set_bandwidth", libbladeRF.bladerf_set_bandwidth,
+                             dev_ptr, rx_ch, int(self.bandwidth), ffi.NULL)
+            _, t_gm = _timed(f"RX{ch_idx} set_gain_mode", libbladeRF.bladerf_set_gain_mode,
+                             dev_ptr, rx_ch, MGC)
+            _, t_rg = _timed(f"RX{ch_idx} set_gain", libbladeRF.bladerf_set_gain,
+                             dev_ptr, rx_ch, gains_rx[ch_idx])
+            _, t_tg = _timed(f"TX{ch_idx} set_gain", libbladeRF.bladerf_set_gain,
+                             dev_ptr, tx_ch, gains_tx[ch_idx])
+            _log_usb(f"cfg RX{ch_idx}", set_freq=_fmt_dur(t_rf),
+                     set_rate=_fmt_dur(t_rs), set_bw=_fmt_dur(t_rb),
+                     gain_mode=_fmt_dur(t_gm), rx_gain=_fmt_dur(t_rg),
+                     tx_gain=_fmt_dur(t_tg))
 
         print(f"[bladerf] Dual-channel configured: TX1={gains_tx[0]}dB TX2={gains_tx[1]}dB RX1={gains_rx[0]}dB RX2={gains_rx[1]}dB")
 
@@ -106,21 +150,32 @@ class BladeRFDriver:
         module just takes effect whenever it's next enabled.
         """
         dev_ptr = self.device.dev[0]
-        libbladeRF.bladerf_set_gain_mode(dev_ptr, bladerf.CHANNEL_RX(0), MGC)
-        libbladeRF.bladerf_set_gain_mode(dev_ptr, bladerf.CHANNEL_RX(1), MGC)
-        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_RX(0), int(self.rx_gain))
-        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_RX(1), int(self.rx2_gain))
-        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_TX(0), int(self.tx_gain))
-        libbladeRF.bladerf_set_gain(dev_ptr, bladerf.CHANNEL_TX(1), int(self.tx2_gain))
+        _, t1 = _timed("RX0 set_gain_mode", libbladeRF.bladerf_set_gain_mode,
+                       dev_ptr, bladerf.CHANNEL_RX(0), MGC)
+        _, t2 = _timed("RX1 set_gain_mode", libbladeRF.bladerf_set_gain_mode,
+                       dev_ptr, bladerf.CHANNEL_RX(1), MGC)
+        _, t3 = _timed("RX0 set_gain", libbladeRF.bladerf_set_gain,
+                       dev_ptr, bladerf.CHANNEL_RX(0), int(self.rx_gain))
+        _, t4 = _timed("RX1 set_gain", libbladeRF.bladerf_set_gain,
+                       dev_ptr, bladerf.CHANNEL_RX(1), int(self.rx2_gain))
+        _, t5 = _timed("TX0 set_gain", libbladeRF.bladerf_set_gain,
+                       dev_ptr, bladerf.CHANNEL_TX(0), int(self.tx_gain))
+        _, t6 = _timed("TX1 set_gain", libbladeRF.bladerf_set_gain,
+                       dev_ptr, bladerf.CHANNEL_TX(1), int(self.tx2_gain))
+        _log_usb("reapply_dual_gains",
+                 rx0_mode=_fmt_dur(t1), rx1_mode=_fmt_dur(t2),
+                 rx0=_fmt_dur(t3), rx1=_fmt_dur(t4),
+                 tx0=_fmt_dur(t5), tx1=_fmt_dur(t6))
 
     def set_tuning_mode_fpga(self):
         """Switch to FPGA tuning mode — retunes execute on-FPGA, no USB round-trip."""
         dev_ptr = self.device.dev[0]
-        rc = libbladeRF.bladerf_set_tuning_mode(dev_ptr, TUNING_MODE_FPGA)
+        rc, dt = _timed("set_tuning_mode", libbladeRF.bladerf_set_tuning_mode,
+                        dev_ptr, TUNING_MODE_FPGA)
         if rc != 0:
             print(f"[bladerf] WARNING: set_tuning_mode FPGA returned {rc}")
         else:
-            print("[bladerf] Tuning mode set to FPGA")
+            _log_usb("set_tuning_mode=FPGA", time=_fmt_dur(dt))
 
     def get_timestamp(self, direction):
         """Get current hardware timestamp (in sample counts) for TX or RX direction."""
@@ -334,6 +389,7 @@ class BladeRFDriver:
         self.tx_running = True
         self._dual_channel = True
         self._rebuild_tx_dual_buffer()
+        t0 = time.time()
         self.device.sync_config(
             layout=ChannelLayout.TX_X2,
             fmt=Format.SC16_Q11,
@@ -342,8 +398,13 @@ class BladeRFDriver:
             num_transfers=8,
             stream_timeout=3500
         )
+        t1 = time.time()
         self.device.enable_module(bladerf.CHANNEL_TX(0), True)
+        t2 = time.time()
         self.device.enable_module(bladerf.CHANNEL_TX(1), True)
+        t3 = time.time()
+        _log_usb("start_tx_dual", sync_config=_fmt_dur(t1 - t0),
+                 enable_TX0=_fmt_dur(t2 - t1), enable_TX1=_fmt_dur(t3 - t2))
         self._tx_thread = threading.Thread(target=self._tx_loop_dual, daemon=True)
         self._tx_thread.start()
 
@@ -360,8 +421,12 @@ class BladeRFDriver:
             print(f"[bladerf] TX dual error: {e}")
         finally:
             try:
+                t0 = time.time()
                 self.device.enable_module(bladerf.CHANNEL_TX(0), False)
+                t1 = time.time()
                 self.device.enable_module(bladerf.CHANNEL_TX(1), False)
+                _log_usb("stop_tx_dual", disable_TX0=_fmt_dur(t1 - t0),
+                         disable_TX1=_fmt_dur(time.time() - t1))
             except Exception:
                 pass
             self.tx_running = False
@@ -383,6 +448,7 @@ class BladeRFDriver:
         self._rx_stop.clear()
         self.rx_running = True
         self._dual_channel = True
+        t0 = time.time()
         self.device.sync_config(
             layout=ChannelLayout.RX_X2,
             fmt=Format.SC16_Q11,
@@ -391,8 +457,13 @@ class BladeRFDriver:
             num_transfers=8,
             stream_timeout=3500
         )
+        t1 = time.time()
         self.device.enable_module(bladerf.CHANNEL_RX(0), True)
+        t2 = time.time()
         self.device.enable_module(bladerf.CHANNEL_RX(1), True)
+        t3 = time.time()
+        _log_usb("start_rx_dual", sync_config=_fmt_dur(t1 - t0),
+                 enable_RX0=_fmt_dur(t2 - t1), enable_RX1=_fmt_dur(t3 - t2))
         self._rx_thread = threading.Thread(target=self._rx_loop_dual, args=(callback, num_samples), daemon=True)
         self._rx_thread.start()
 
@@ -417,8 +488,12 @@ class BladeRFDriver:
             print(f"[bladerf] RX dual error: {e}")
         finally:
             try:
+                t0 = time.time()
                 self.device.enable_module(bladerf.CHANNEL_RX(0), False)
+                t1 = time.time()
                 self.device.enable_module(bladerf.CHANNEL_RX(1), False)
+                _log_usb("stop_rx_dual", disable_RX0=_fmt_dur(t1 - t0),
+                         disable_RX1=_fmt_dur(time.time() - t1))
             except Exception:
                 pass
             self.rx_running = False
