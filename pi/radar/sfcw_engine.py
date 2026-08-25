@@ -774,7 +774,8 @@ class SFCWEngine:
             else:
                 rc1 = libbladeRF.bladerf_set_frequency(dev_ptr, rx_ch, f_r)
             t1 = time.time()
-            _log_timing(f"  Step {idx:3d} <<< RX retune ACK RECEIVED")
+            _log_timing(f"  Step {idx:3d} <<< RX retune ACK RECEIVED",
+                       took=_format_duration(t1 - t0))
             _log_timing(f"  Step {idx:3d} >>> TX retune CMD SENT")
             t_tx = time.time()
             if use_qt:
@@ -782,7 +783,8 @@ class SFCWEngine:
             else:
                 rc2 = libbladeRF.bladerf_set_frequency(dev_ptr, tx_ch, f_r)
             t2 = time.time()
-            _log_timing(f"  Step {idx:3d} <<< TX retune ACK RECEIVED")
+            _log_timing(f"  Step {idx:3d} <<< TX retune ACK RECEIVED",
+                       took=_format_duration(t2 - t_tx))
 
             if rc1 != 0 or rc2 != 0:
                 # Always logged, every step: that step's data is at the WRONG
@@ -793,7 +795,8 @@ class SFCWEngine:
                            rx_rc=rc1, tx_rc=rc2,
                            note="step_data_captured_at_previous_frequency")
 
-            return t1 - t0, t2 - t_tx
+            # (rx_duration, tx_duration, rx_ack_wallclock, tx_ack_wallclock)
+            return t1 - t0, t2 - t_tx, t1, t2
 
         # Pipelining: step 0's retunes are issued here; every later step's are
         # issued at the END of the previous step — right after its capture,
@@ -801,7 +804,7 @@ class SFCWEngine:
         # the Pi-side NumPy work instead of extending the step. seq_at_retune
         # snapshots the buffer counter at retune time so buffers arriving
         # during the compute already count toward the next step's settling.
-        retune_rx_duration, retune_tx_duration = issue_retune(0)
+        pending_retune = issue_retune(0)
         seq_at_retune = self._rx_seq
 
         for i in range(num_steps):
@@ -810,6 +813,10 @@ class SFCWEngine:
 
             step_start = time.time()
             f = int(freqs[i])
+            # This step's own retune stats: durations and when their ACKs
+            # landed (measured back when issue_retune ran, possibly during
+            # the previous step's window).
+            cur_rx_dur, cur_tx_dur, cur_rx_ack, cur_tx_ack = pending_retune
 
             # Wait for settling packets (bladeRF streams continuously on EP0x81, Pi just counts arrivals)
             if i in log_steps:
@@ -890,10 +897,10 @@ class SFCWEngine:
             # step's retunes immediately, before this step's compute, so their
             # USB latency runs concurrently with the NumPy work below.
             if i + 1 < num_steps and not stop_event.is_set():
-                next_rx_dur, next_tx_dur = issue_retune(i + 1)
+                next_retune = issue_retune(i + 1)
                 seq_at_retune = self._rx_seq
             else:
-                next_rx_dur = next_tx_dur = 0.0
+                next_retune = (0.0, 0.0, 0.0, 0.0)
 
             if i in log_steps:
                 # Compare all 14 buffers side-by-side to check for duplicates
@@ -948,15 +955,23 @@ class SFCWEngine:
             settle_duration = settle_end - wait_start
             capture_duration = wait_end - settle_end
 
-            # One line for EVERY step: each transaction's time. retune_rx/tx are
-            # the two control round-trips; settle/capture are bulk-IN stream time
-            # (settle_count discarded + num_buffers kept buffers); compute is Pi CPU.
+            # This step's own retune cost COUNTED FROM step_start: how much of
+            # the [cmd sent .. ACK received] window fell inside this step. With
+            # pipelining the ACKs landed during the previous step, so this is
+            # 0 — the step never waited for its own tuning.
+            rx_in_step = max(0.0, min(cur_rx_dur, cur_rx_ack - step_start))
+            tx_in_step = max(0.0, min(cur_tx_dur, cur_tx_ack - step_start))
+
+            # One line for EVERY step: each transaction's time as this step
+            # experienced it. next_retune is the time spent in THIS window
+            # sending the following step's commands (the pipelined cost).
             _log_timing(f"  Step {i:3d} {f/1e9:.3f}GHz",
                        ok="yes" if sig_bufs else "NO_DATA",
-                       retune_rx=_format_duration(retune_rx_duration),
-                       retune_tx=_format_duration(retune_tx_duration),
+                       retune_rx=_format_duration(rx_in_step),
+                       retune_tx=_format_duration(tx_in_step),
                        settle=_format_duration(settle_duration),
                        capture=_format_duration(capture_duration),
+                       next_retune=_format_duration(next_retune[0] + next_retune[1]),
                        compute=_format_duration(compute_duration),
                        total=_format_duration(step_total))
 
@@ -969,9 +984,9 @@ class SFCWEngine:
             if progress_cb and i % 10 == 0:
                 progress_cb(i)
 
-            # Hand over the pipelined retune timings measured after this
-            # step's capture — they belong to step i+1's summary line.
-            retune_rx_duration, retune_tx_duration = next_rx_dur, next_tx_dur
+            # Hand over the pipelined retune stats measured after this step's
+            # capture — they belong to step i+1's summary line.
+            pending_retune = next_retune
 
         # Reference division (phase correction)
         _log_separator('─')
