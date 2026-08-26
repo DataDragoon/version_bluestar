@@ -91,6 +91,24 @@ CHAPTERS = [
         nav=['What it is', 'The wiring', 'The two waterlines', 'The clear line',
              'Sibling FIFOs', 'Data provenance'],
     ),
+    dict(
+        id='ch6', num='06', title='The Sample Reader', frag='ch6.frag.html', prefix='d',
+        dek='<code>fifo_reader</code> &mdash; what decides when to pop the TX FIFO, how a 64-bit word '
+            'becomes per-channel samples, and why an idle transmitter is not a silent one.',
+        tally=[('2', 'state machines'), ('1022', 'reads per message'),
+               ('&plusmn;2047', 'silent truncation'), ('1', 'state unreachable')],
+        nav=['What it is', 'Two machines, one licence', 'What one read serves',
+             'The timestamp gate', 'Idle is not silent', 'Wired but unread'],
+    ),
+    dict(
+        id='ch7', num='07', title='The Sample Packer', frag='ch7.frag.html', prefix='w',
+        dek='<code>fifo_writer</code> &mdash; what packs RX samples into the FIFO, builds the '
+            'metadata header, and why its credit check does nothing at all in the SFCW build.',
+        tally=[('2', 'state machines'), ('128', 'bit header'),
+               ('4', 'header slots reserved'), ('1', 'LED, no register')],
+        nav=['What it is', 'Two machines, one interlock', 'How samples get packed',
+             'The header it builds', 'The credit check', 'Overflow and dead code'],
+    ),
 ]
 
 # index.frag.html holds three <section>s: [0] chapter cards (unused here),

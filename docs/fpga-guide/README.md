@@ -5,7 +5,7 @@ Published as a Claude Artifact:
 
 **https://claude.ai/code/artifact/cd0df1ad-2556-428f-a75a-1b02b4236619**
 
-Five chapters, one page, sticky chapter index down the left side, print styles so
+Seven chapters, one page, sticky chapter index down the left side, print styles so
 Ctrl-P → Save as PDF gives a clean document.
 
 | Ch | Title | Fragment | Section id prefix |
@@ -15,6 +15,15 @@ Ctrl-P → Save as PDF gives a clean document.
 | 03 | The NIOS | `ch3.frag.html` | `n1`…`n7` |
 | 04 | The TX FIFO | `ch4.frag.html` | `t1`…`t6` |
 | 05 | The RX FIFO | `ch5.frag.html` | `x1`…`x6` |
+| 06 | The Sample Reader | `ch6.frag.html` | `d1`…`d6` |
+| 07 | The Sample Packer | `ch7.frag.html` | `w1`…`w6` |
+
+Chapters 4/5 are the two FIFOs as *storage*; 6/7 are the two modules that drive them
+from the AD9361 side. They cross-reference each other heavily — several findings are
+comparisons between the reader and the writer (the credit asymmetry, the LED one-shots,
+`pack()` vs `unpack()`), and each is stated once in its own chapter with a pointer from
+the other. If you edit one of those, check the pointer in its counterpart still reads
+true.
 
 `index.frag.html` holds the front-matter "Findings at a glance" and the closing
 "How this was made". `base-head.html` is the shared `<style>` block (design tokens,

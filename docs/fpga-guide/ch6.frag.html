@@ -1,0 +1,252 @@
+<section>
+  <h2>What it is</h2>
+  <p class="sub">the TX sample reader &#183; between the TX FIFO and the DAC</p>
+  <p>Chapter 4 covered the TX FIFO as storage. <code>fifo_reader</code> is what decides <em>when to pop it and what to do with the word</em>. It unpacks 64-bit words into per-channel samples, holds a burst until its scheduled timestamp arrives, and hands the result to the DAC.</p>
+  <p>Like its RX counterpart it runs in the <strong><code>tx_clock</code></strong> domain and contains <strong>two state machines</strong> &mdash; but here the coupling is a licence rather than an interlock: the metadata machine decides <em>whether the sample machine may read at all</em>.</p>
+
+  <div class="scroller">
+    <table>
+      <thead><tr><th>Generic</th><th>Value here</th><th>Consequence</th></tr></thead>
+      <tbody>
+        <tr class="hot"><td>NUM_STREAMS</td><td class="num">2</td><td>two TX channels</td></tr>
+        <tr class="hot"><td>FIFO_READ_THROTTLE</td><td class="num">0</td><td>makes an entire state unreachable</td></tr>
+        <tr><td>FIFO_DATA_WIDTH</td><td class="num">64</td><td>two samples per read</td></tr>
+        <tr><td>FIFO_USEDW_WIDTH</td><td class="num">12</td><td>never actually read</td></tr>
+        <tr><td>META_FIFO_DATA_WIDTH</td><td class="num">128</td><td>one whole header per read</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>One input is not what its name suggests: <code>fifo_empty</code> is the <strong>trigger-gated</strong> empty from Chapter 4, not the FIFO's raw flag. Everything below inherits that &mdash; including, as it turns out, the underflow detector.</p>
+  <p>A second one is misread even more often. <code>fifo_holdoff</code>, the reader's only back-pressure input, has <strong>nothing to do with the TX FIFO</strong>: it comes from the <em>loopback</em> FIFO's full flag, and <code>tx.vhd</code> stretches it by three cycles so the loopback path has time to drain. The TX FIFO itself can never push back on this module.</p>
+
+  <p>781 lines of VHDL, instantiated exactly once &mdash; <code>U_fifo_reader</code> in <code>tx.vhd</code>. It and <code>fifo_writer</code> (Chapter 7) read as a matched pair: same package imports, same <code>current</code>/<code>future</code> record idiom, same split into a synchronous process that does nothing but <code>current &lt;= future</code> and a <code>process(all)</code> that does all the work. <strong>The symmetry ends at the first decision that costs something.</strong></p>
+
+  <div class="scroller" style="margin-bottom:20px">
+    <p class="tbl-title">Where the pair stops being symmetric</p>
+    <table>
+      <thead><tr><th>&nbsp;</th><th>fifo_reader (ch 06)</th><th>fifo_writer (ch 07)</th></tr></thead>
+      <tbody>
+        <tr><td>Lines of VHDL</td><td class="num">781</td><td class="num">763</td></tr>
+        <tr><td>Sample FSM states</td><td class="num">6</td><td class="num">4</td></tr>
+        <tr><td>Meta FSM states</td><td class="num">3</td><td class="num">4</td></tr>
+        <tr><td>Metadata role</td><td>reads headers, decides <em>when</em> to pop</td><td>writes headers, stamps <em>when</em> it pushed</td></tr>
+        <tr class="hot"><td>Reads FIFO occupancy?</td><td><strong>no</strong> &mdash; port declared, never referenced</td><td><strong>yes</strong> &mdash; registered, then compared</td></tr>
+        <tr><td>Back-pressure input</td><td><code>fifo_holdoff</code>, from loopback only</td><td><code>fifo_full</code>, from the FIFO itself</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="scroller">
+    <p class="tbl-title">fifo_reader &#183; complete port list, as connected in tx.vhd</p>
+    <table>
+      <thead><tr><th>Port</th><th>Dir</th><th>W</th><th>Connected to</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>clock</td><td>in</td><td class="num">1</td><td><code>tx_clock</code> = <code>ad9361.clock</code></td><td>&mdash;</td></tr>
+        <tr><td>reset</td><td>in</td><td class="num">1</td><td><code>tx_reset</code></td><td>Forces both FSMs to their reset records</td></tr>
+        <tr><td>enable</td><td>in</td><td class="num">1</td><td><code>tx_enable</code></td><td>Deasserting it clears the meta FSM outright and parks the sample FSM</td></tr>
+        <tr><td>usb_speed</td><td>in</td><td class="num">1</td><td>NIOS control register</td><td>Selects 2048- or 1024-word DMA buffers</td></tr>
+        <tr><td>meta_en</td><td>in</td><td class="num">1</td><td>NIOS control register, synchronized</td><td>Off: pop freely. On: pop only when the meta FSM says go</td></tr>
+        <tr><td>packet_en</td><td>in</td><td class="num">1</td><td><code>packet_en_tx</code>, synchronized</td><td>Switches both FSMs into packet mode</td></tr>
+        <tr><td>eight_bit_mode_en</td><td>in</td><td class="num">1</td><td><code>eightbit_en_tx</code></td><td>Two samples per 16-bit lane</td></tr>
+        <tr><td>highly_packed_mode_en</td><td>in</td><td class="num">1</td><td><code>highly_packed_en_txrx</code></td><td>SC12Q11 &mdash; one bit shared with RX</td></tr>
+        <tr class="hot"><td>timestamp</td><td>in</td><td class="num">64</td><td><code>tx_timestamp</code>, from <code>time_tamer</code></td><td>Compared against the header to decide launch</td></tr>
+        <tr class="hot"><td>fifo_data</td><td>in</td><td class="num">64</td><td><code>sample_fifo.rdata</code></td><td>Two packed samples, already valid (show-ahead)</td></tr>
+        <tr class="hot"><td>fifo_empty</td><td>in</td><td class="num">1</td><td><code>sample_fifo.rempty</code> &mdash; <b>trigger-gated</b>, ch 04</td><td>The only FIFO status the reader consults</td></tr>
+        <tr class="hot"><td>fifo_read</td><td>buffer</td><td class="num">1</td><td><code>sample_fifo.rreq</code></td><td>Pop-acknowledge</td></tr>
+        <tr><td>fifo_usedw</td><td>in</td><td class="num">12</td><td><code>sample_fifo.rused</code> &mdash; <b>never referenced</b></td><td>Only its <code>'length</code> is used</td></tr>
+        <tr><td>fifo_holdoff</td><td>in</td><td class="num">1</td><td><code>sample_fifo_holdoff</code>, from the loopback FIFO</td><td>Diverts to <code>READ_HOLDOFF</code></td></tr>
+        <tr><td>meta_fifo_data</td><td>in</td><td class="num">128</td><td><code>meta_fifo.rdata</code></td><td>One whole header</td></tr>
+        <tr><td>meta_fifo_empty</td><td>in</td><td class="num">1</td><td><code>meta_fifo.rempty</code> &mdash; <b>not</b> trigger-gated</td><td>Gates <code>META_LOAD</code></td></tr>
+        <tr><td>meta_fifo_read</td><td>buffer</td><td class="num">1</td><td><code>meta_fifo.rreq</code></td><td>One-cycle pulse in <code>META_LOAD</code></td></tr>
+        <tr><td>meta_fifo_usedw</td><td>in</td><td class="num">9</td><td><code>meta_fifo.rused</code> &mdash; <b>never referenced</b></td><td>Only its <code>'length</code> is used</td></tr>
+        <tr><td>in_sample_controls</td><td>in</td><td class="num">2&#215;2</td><td><code>dac_controls</code></td><td>Per-channel enable and data request</td></tr>
+        <tr class="hot"><td>out_samples</td><td>out</td><td class="num">2&#215;33</td><td><code>dac_streams</code></td><td>I, Q and valid per channel</td></tr>
+        <tr><td>packet_control</td><td>out</td><td class="num">&mdash;</td><td><code>tx_packet_control</code> &mdash; <b>consumed by nobody</b></td><td>Packet-mode payload</td></tr>
+        <tr><td>packet_empty</td><td>out</td><td class="num">1</td><td><code>tx_packet_empty</code> &mdash; <b>consumed by nobody</b></td><td>&mdash;</td></tr>
+        <tr><td>packet_ready</td><td>in</td><td class="num">1</td><td><code>tx_packet_ready</code> &mdash; <b>tied to '1'</b></td><td>Every guard on it is statically true here</td></tr>
+        <tr><td>underflow_led</td><td>buffer</td><td class="num">1</td><td><code>tx_underflow_led</code></td><td>One-shot, see below</td></tr>
+        <tr><td>underflow_count</td><td>buffer</td><td class="num">64</td><td><code>open</code></td><td>Counter synthesized, observed by nothing</td></tr>
+        <tr><td>underflow_duration</td><td>in</td><td class="num">16</td><td><code>x"ffff"</code></td><td>65535 clocks of LED hold</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Two state machines, one licence</h2>
+  <p class="sub">the meta FSM decides when; the sample FSM decides what</p>
+
+  <figure>
+    <svg viewBox="0 0 900 390" role="img" aria-label="Diagram of the two state machines in fifo_reader. The sample FSM on the left runs COMPUTE_ENABLED_CHANNELS to COMPUTE_OFFSETS to READ_SAMPLES. The meta FSM on the right runs META_LOAD to META_WAIT to META_DOWNCOUNT. The meta FSM licenses the sample FSM through meta_time_go, and each sample read decrements the meta FSM's DMA downcounter by two.">
+      <defs>
+        <marker id="da" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="di" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--indigo)"/>
+        </marker>
+        <marker id="dr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--rust)"/>
+        </marker>
+      </defs>
+
+      <text x="90" y="42" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="currentColor">SAMPLE FSM</text>
+      <text x="610" y="42" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="var(--rust)">META FSM</text>
+
+      <g font-family="JetBrains Mono, monospace" font-size="10.5" text-anchor="middle">
+        <rect x="90" y="60" width="160" height="46" fill="var(--surface)" stroke="currentColor"/><text x="170" y="82" fill="currentColor">COMPUTE_ENABLED</text><text x="170" y="96" fill="currentColor">_CHANNELS</text>
+        <rect x="90" y="160" width="160" height="46" fill="var(--surface)" stroke="currentColor"/><text x="170" y="188" fill="currentColor">COMPUTE_OFFSETS</text>
+        <rect x="90" y="262" width="160" height="46" fill="var(--surface)" stroke="var(--indigo)" stroke-width="1.5"/><text x="170" y="290" fill="var(--indigo)">READ_SAMPLES</text>
+
+        <rect x="610" y="60" width="160" height="46" fill="var(--surface)" stroke="currentColor"/><text x="690" y="88" fill="currentColor">META_LOAD</text>
+        <rect x="610" y="160" width="160" height="46" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/><text x="690" y="188" fill="var(--rust)">META_WAIT</text>
+        <rect x="610" y="262" width="160" height="46" fill="var(--surface)" stroke="currentColor"/><text x="690" y="290" fill="currentColor">META_DOWNCOUNT</text>
+      </g>
+
+      <line x1="170" y1="108" x2="170" y2="156" stroke="currentColor" stroke-width="1.25" marker-end="url(#da)"/>
+      <text x="180" y="136" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">1 cycle</text>
+      <line x1="170" y1="208" x2="170" y2="258" stroke="currentColor" stroke-width="1.25" marker-end="url(#da)"/>
+      <text x="180" y="238" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">1 cycle</text>
+      <path d="M 90 285 L 40 285 L 40 83 L 86 83" fill="none" stroke="currentColor" stroke-width="1.25" marker-end="url(#da)"/>
+      <text x="30" y="184" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" transform="rotate(-90 30 184)" text-anchor="middle">fifo_empty &#8594; re-evaluate MIMO</text>
+
+      <line x1="690" y1="108" x2="690" y2="156" stroke="currentColor" stroke-width="1.25" marker-end="url(#da)"/>
+      <text x="700" y="136" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">header popped</text>
+      <line x1="690" y1="208" x2="690" y2="258" stroke="var(--rust)" stroke-width="1.5" marker-end="url(#dr)"/>
+      <text x="700" y="238" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)">timestamp arrives</text>
+      <path d="M 770 285 L 830 285 L 830 83 L 774 83" fill="none" stroke="currentColor" stroke-width="1.25" marker-end="url(#da)"/>
+      <text x="838" y="184" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" transform="rotate(-90 838 184)" text-anchor="middle">dma_downcount &#8804; 2</text>
+
+      <line x1="606" y1="132" x2="256" y2="132" stroke="var(--rust)" stroke-width="1.5" marker-end="url(#dr)"/>
+      <text x="431" y="124" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--rust)" text-anchor="middle">meta_time_go = 1 &#8594; reads permitted</text>
+
+      <line x1="256" y1="330" x2="606" y2="330" stroke="var(--indigo)" stroke-width="1.5" marker-end="url(#di)"/>
+      <text x="431" y="322" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--indigo)" text-anchor="middle">each fifo_read subtracts 2 from dma_downcount</text>
+
+      <line x1="14" y1="358" x2="886" y2="358" stroke="var(--rule)"/>
+      <text x="14" y="378" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">Not shown: READ_PACKET, READ_HOLDOFF, and READ_THROTTLE &#8212; the last is unreachable because its throttle generic is 0.</text>
+    </svg>
+    <figcaption><b>The same two-machine shape as the writer, mirrored.</b> <code>META_WAIT</code> is where a scheduled burst parks until the TX timestamp catches up; <code>READ_SAMPLES</code> is where everything actually happens.</figcaption>
+  </figure>
+
+  <p>The first two sample states are <strong>one cycle each</strong> and exist only to recompute the channel packing. They are re-entered every time the FIFO runs dry &mdash; which has a side effect worth knowing: <strong>a MIMO channel enable change made while the FIFO stays fed is never noticed.</strong> The configuration is only re-sampled after an underrun.</p>
+  <p>The counters balance exactly. The meta FSM loads <code>dma_buf_size &minus; 4</code> = <strong>2044</strong> on SuperSpeed &mdash; the 2048-word DMA buffer less its four header words &mdash; each read subtracts <code>NUM_STREAMS</code>, and it exits at <code>&le; 2</code>, giving <strong>1022 reads per message</strong>. That is precisely the 2044 words the GPIF wrote on the other side.</p>
+  <p>The threshold is not 0 because of turnaround, and the source says so in as many words: <i>&ldquo;Look for 2 because of the 2 cycles passing through META_LOAD and META_WAIT after this.&rdquo;</i></p>
+</section>
+
+<section>
+  <h2>What one read serves</h2>
+  <p class="sub">the cadence, and what gets thrown away</p>
+  <p>A single 64-bit word can satisfy more than one request. The governing quantity is <code>samples_left_init = NUM_STREAMS &minus; enabled_channels</code>:</p>
+
+  <div class="scroller" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>Mode</th><th>Channels</th><th>Requests per FIFO read</th></tr></thead>
+      <tbody>
+        <tr class="hot"><td>SC16_Q11</td><td class="num">2</td><td class="num">1</td></tr>
+        <tr><td>SC16_Q11</td><td class="num">1</td><td class="num">2</td></tr>
+        <tr><td>8-bit</td><td class="num">2</td><td class="num">2</td></tr>
+        <tr><td>8-bit</td><td class="num">1</td><td class="num">4</td></tr>
+        <tr><td>packed 12-bit</td><td class="num">2</td><td>4 requests per <b>3</b> reads</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The packed mode is the interesting one: it keeps a 48-bit carry buffer and reassembles samples that straddle word boundaries, so three 64-bit words yield eight 12-bit IQ pairs with nothing wasted. On the fourth cycle it reads nothing at all &mdash; everything comes from the buffer.</p>
+  <p>Its entry condition carries a guard the writer's packer does not:</p>
+<pre>if (highly_packed_mode_en = '1' <b>and NUM_STREAMS = 2</b>) then
+    unpack_sc12q11( ... );</pre>
+  <p><code>fifo_writer</code> packs SC12Q11 whenever the mode bit is set, whatever <code>NUM_STREAMS</code> is. On this board the generic is 2, so the two agree and nothing is wrong in the shipped image. <strong>On a single-stream instantiation of the same source they would disagree</strong>, and the writer would emit a format the reader would not parse.</p>
+
+  <h3 class="axis">The standard unpack throws away a quarter of the word</h3>
+  <p>The bit positions are hardcoded constants that the source itself flags as provisional:</p>
+<pre>constant I_HIGH : natural := <b>11</b>;   constant I_LOW : natural := 0;
+constant Q_HIGH : natural := <b>27</b>;   constant Q_LOW : natural := 16;
+<i>-- The following 4 constants are platform-specific and perhaps
+-- should be parameters instead. This is good enough for now.</i></pre>
+  <div class="scroller" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>Output</th><th>Bits taken</th><th>Bits discarded</th></tr></thead>
+      <tbody>
+        <tr><td>ch0 I / Q</td><td>11:0 / 27:16</td><td>15:12, 31:28</td></tr>
+        <tr><td>ch1 I / Q</td><td>43:32 / 59:48</td><td>47:44, 63:60</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Those discarded nibbles are the host's sign extension &mdash; the FPGA re-derives sign from bit 11 instead. Which means a host sample outside &plusmn;2047 is <strong>silently truncated here, not clipped</strong>. It wraps.</p>
+  <p>The unpacker sign-extends bit 11 back up to 16 bits, and then two stages later <code>dac_assignment_proc</code> keeps 11:0 again and left-justifies into the DAC &mdash; so <strong>the sign extension it performs is discarded before it reaches the AD9361</strong>. Note also that this is not the inverse of what the writer does: <code>pack()</code> stores both 16-bit halves of every sample whole, and the RX direction really does carry all sixteen bits. <strong>The transmit path is twelve bits wide, twice; the receive path is not.</strong></p>
+</section>
+
+<section>
+  <h2>The timestamp gate</h2>
+  <p class="sub">why the comparison subtracts one</p>
+  <p>The header's 64-bit timestamp is read, <strong>one is subtracted</strong>, and the result is what <code>META_WAIT</code> compares against the live TX counter. That subtraction does two unrelated jobs at once, which is why it looks arbitrary.</p>
+
+  <div class="stagerow"><span class="sn">1</span><h3>It pays for the pipeline</h3></div>
+  <p>The go signal is registered, the sample FSM samples it a cycle later, and the output is registered again. Firing the comparison one tick early lands the first sample on the DAC <em>at</em> the requested timestamp rather than one clock past it.</p>
+
+  <div class="stagerow"><span class="sn">2</span><h3>It encodes &ldquo;transmit now&rdquo;</h3></div>
+  <p>The host signals immediate transmit by writing timestamp <strong>zero</strong>. Under the subtraction that wraps to <strong>all ones</strong> &mdash; which the FSM recognises as its <code>NOW</code> constant.</p>
+  <p>This needs an explicit exception, and there is one. The look-ahead rule is &ldquo;a future timestamp means don't go yet&rdquo;, and all-ones compares greater than every real counter value &mdash; so without the carve-out an immediate burst would <strong>never start</strong>. The condition reads &ldquo;in the future <em>and not</em> the NOW sentinel&rdquo;. Both halves are visible in four lines:</p>
+<pre>meta_time := unsigned(meta_current.meta_fifo_data(95 downto 32)) <b>- 1</b>;
+...
+if( (timestamp &gt;= meta_current.meta_p_time or
+     meta_current.meta_p_time = <b>MAX_TIMESTAMP</b>) and ... ) then
+    meta_future.meta_time_go &lt;= '1';</pre>
+  <p>Which is worth stating plainly, because Chapter 2 describes the same mechanism from the host's side: <strong>there is no <code>TX_NOW</code> flag anywhere in this module.</strong> There is an underflowed subtraction and a constant that recognises the result. The flags word of the header is never read by any RTL at all.</p>
+
+  <div class="note">
+    <p class="h">One thing the source cannot settle</p>
+    <p>The go signal is <em>not</em> default-cleared, so it stays asserted through the first cycle after the message ends, and the sample FSM watches the read strobe one cycle late. The <code>&le; 2</code> exit threshold is the author's slack for that turnaround &mdash; the comment says so.</p>
+    <p>Whether a request landing in that one-or-two-cycle window can pull an <strong>extra, uncounted word</strong>, and whether the margin cancels the lag exactly or over-shoots by one word per message, is not answerable by reading the RTL. There is no explicit interlock preventing it. It would need a simulation with a realistic request cadence.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Idle does not mean silent</h2>
+  <p class="sub">the finding that matters most for a stepped sweep</p>
+  <p>Chapter 4 noted that the DAC holds its last value when the FIFO runs dry. Here is the actual mechanism, in three links:</p>
+  <ul>
+    <li><strong>The valid strobe clears itself.</strong> Every unpack function writes <code>data_v := '0'</code>, and the unpack result is assigned as a <em>whole record</em> outside the case statement &mdash; so in every state, every cycle, <code>data_v</code> starts low. It is re-asserted in exactly one line, inside <code>READ_SAMPLES</code>, inside the not-empty branch.</li>
+    <li><strong>The sample data does not clear.</strong> Nothing zeroes it. The FIFO is show-ahead, so with no read its output simply holds the last word, and the reader keeps re-unpacking that same stale word forever.</li>
+    <li><strong>The consumer is clock-enabled by the strobe.</strong> The DAC register's enable <em>is</em> <code>data_v</code>. Low means never reloaded, so it retains its last value and hands that constant to the AD9361.</li>
+  </ul>
+  <p>Put together: on underrun, or after TX is disabled, <strong>the DAC is parked at whatever IQ value was last valid</strong>. That is not silence &mdash; it is a DC offset into the mixer, which radiates as an <strong>unmodulated carrier at the LO</strong>, at that sample's amplitude and phase.</p>
+  <p>There is no TX mux, no zero-injection and no squelch anywhere in the hosted image. libbladeRF treats this as the caller's problem and documents the obligation: the last <strong>two</strong> samples of a burst must be zero. Two, not one, because one 64-bit word carries two samples and which one gets frozen depends on where the unpacker stopped.</p>
+  <div class="note">
+    <p class="h">Why this matters between sweep steps</p>
+    <p>If the TX stream is ever allowed to run dry between frequency steps, TX1 and TX2 <strong>keep radiating</strong> the last sample rather than going quiet. For a stepped-frequency sweep that is a CW tone sitting at the previous step's LO for the whole gap.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Wired but unread</h2>
+  <p class="sub">and one detector that is always firing</p>
+  <div class="mods">
+    <div class="mod"><div class="mod-name">The underflow detector has no request term</div><div class="mod-src">note</div><div class="mod-job">The condition is &ldquo;TX enabled, FIFO dry, and licensed to transmit&rdquo; &mdash; it does <b>not</b> require the DAC to have asked for a sample. So with TX enabled and the host not streaming, it asserts <b>every single clock</b>. That is the origin of the underflow LED being lit whenever TX is idle. An armed-but-unfired trigger does the same thing, since the empty flag it watches is the trigger-gated one.</div></div>
+    <div class="mod"><div class="mod-name">underflow_count &#8594; open</div><div class="mod-src">dead</div><div class="mod-job">A 64-bit counter with edge detection, built and then left unconnected. Exactly as on the RX side. <b>Only an LED escapes the module</b>, and only while the NIOS has not taken manual control of the LEDs.</div></div>
+    <div class="mod"><div class="mod-name">The host never sees this underflow</div><div class="mod-src">note</div><div class="mod-job">The <code>UNDERRUN</code> flag the host actually receives comes from somewhere else entirely &mdash; the GPIF raising it when a message's timestamp has already passed at DMA time. <code>fifo_reader</code>'s own detection reaches a front-panel LED and nothing more.</div></div>
+    <div class="mod"><div class="mod-name">READ_THROTTLE unreachable</div><div class="mod-src">dead</div><div class="mod-job">The throttle generic is 0, which makes the entry condition compile-time false and the state's own counter range collapse to a single value. An entire state, doubly dead.</div></div>
+    <div class="mod"><div class="mod-name">Both occupancy inputs unread</div><div class="mod-src">dead</div><div class="mod-job">The sample and metadata FIFO fill levels are wired in from live signals and <b>never referenced</b> in the body. The reader is driven purely by empty flags. Both synthesize away.</div></div>
+    <div class="mod"><div class="mod-name">The whole packet path dangles</div><div class="mod-src">dead</div><div class="mod-job">Its outputs are connected at the top level and consumed by <b>nothing</b>; the ready input is tied high, making four tests statically true. The packet state is reachable at runtime but everything it produces is discarded &mdash; the port exists for other platform variants.</div></div>
+    <div class="mod"><div class="mod-name">Packet core id and flags never assigned</div><div class="mod-src">dead</div><div class="mod-job">Both sit unread in the cached header and stay at zero forever. The TX packet path cannot address a specific core even where it is used.</div></div>
+    <div class="mod"><div class="mod-name">meta_p_time resets to <code>'-'</code></div><div class="mod-src">note</div><div class="mod-job">A synthesis don't-care, not a zero. Harmless, since it is written before it is read &mdash; but it means simulation and hardware need not agree on the first cycle after reset. <code>fifo_writer</code> has two fields of its own like this.</div></div>
+  </div>
+
+  <h3 class="axis">The LED one-shot, and why the RX one behaves differently</h3>
+  <p>The reload is a <em>separate statement</em> here, not an <code>elsif</code>:</p>
+<pre>underflow_led &lt;= '0';
+if( downcount /= 0 ) then
+    downcount := downcount - 1;
+    underflow_led &lt;= '1';
+end if;
+<b>if</b>( underflow_detected = '1' ) then
+    downcount := to_integer(underflow_duration);
+end if;</pre>
+  <p>So the decrement still runs while the condition is asserting, and <strong>a sustained TX underflow lights its LED and holds it</strong>. Chapter 7 shows the writer's version of these same three processes with the reload as an <code>elsif</code> instead &mdash; one keyword apart, opposite behaviour, and the RX LED stays <em>dark</em> for the whole event.</p>
+
+  <h3 class="axis">Two things a simulator would flag</h3>
+  <p>The channel index arithmetic can compute an out-of-range value &mdash; it is saved only by an enable guard on the same line. Relax that guard and it breaks.</p>
+  <p>And the cadence formula happens to be correct only because there are exactly two streams. A four-stream instance with two enabled would compute three requests per read instead of two. Harmless here; latent everywhere else.</p>
+  <p>Two more sit inside <code>unpack_sc12q11</code>, both inert at this instantiation. The procedure declares <code>data</code> as a parameter and uses it throughout &mdash; except in its <code>cycle = 2</code> branch, which reaches past the parameter list and reads the signal <code>fifo_data</code> directly; here they are the same signal, so it works. In the <code>cycle = 3</code> branch, <code>rv(1)</code>'s fields are resized using <code>rv(0).data_i'length</code>; both are 16, so it works. The reader also declares <code>packed_cycle</code> over <code>0 to 4</code> while only using 0 through 3. All three are real, all three are harmless, and all three would bite the first time this module is reused with different parameters.</p>
+</section>

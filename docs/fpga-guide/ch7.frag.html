@@ -1,0 +1,251 @@
+<section>
+  <h2>What it is</h2>
+  <p class="sub">the RX sample packer &#183; between the RX mux and the RX FIFO</p>
+  <p>Chapter 5 covered the RX FIFO as storage. <code>fifo_writer</code> is what decides <em>what goes into it and when</em>. It takes the per-channel sample streams coming out of the RX mux, packs them into 64-bit words, and builds the metadata header that rides alongside.</p>
+  <p>It runs entirely in the <strong><code>rx_clock</code></strong> domain &mdash; the AD9361 sample clock &mdash; and contains <strong>two independent state machines</strong> coupled by a single interlock bit.</p>
+
+  <div class="scroller">
+    <table>
+      <thead><tr><th>Generic</th><th>Value here</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr class="hot"><td>NUM_STREAMS</td><td class="num">2</td><td>two RX channels</td></tr>
+        <tr><td>FIFO_DATA_WIDTH</td><td class="num">64</td><td>one MIMO pair per write</td></tr>
+        <tr><td>FIFO_USEDW_WIDTH</td><td class="num">13</td><td>8192 words of sample FIFO</td></tr>
+        <tr><td>META_FIFO_DATA_WIDTH</td><td class="num">128</td><td>one whole header per write</td></tr>
+        <tr><td>META_FIFO_USEDW_WIDTH</td><td class="num">11</td><td>2048 headers</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The width assertion inside passes with <strong>zero margin</strong>: 64 &ge; 2 channels &times; 2 components &times; 16 bits. There is no spare room in the write word.</p>
+  <p>One input worth noting: it is wired to <code>mux_streams</code>, not the raw ADC. So everything below applies equally to the counter and digital-loopback test modes &mdash; they go through the same packer.</p>
+  <p>763 lines of VHDL, instantiated exactly once &mdash; <code>U_fifo_writer</code> in <code>rx.vhd</code>. Chapter 6 laid out where it and <code>fifo_reader</code> stop being mirror images; the ports below are the ones that differ.</p>
+
+  <div class="scroller">
+    <p class="tbl-title">fifo_writer &#183; the ports that differ from the reader's</p>
+    <table>
+      <thead><tr><th>Port</th><th>Dir</th><th>W</th><th>Connected to</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr class="hot"><td>mini_exp</td><td>in</td><td class="num">2</td><td><code>mini_exp</code> pins &mdash; two <code>synchronizer</code> instances inside</td><td>The expansion-pin state is stamped into <b>every</b> RX header</td></tr>
+        <tr class="hot"><td>in_samples</td><td>in</td><td class="num">2&#215;33</td><td><code>mux_streams</code>, from <code>rx_mux</code></td><td>ADC, counter or loopback &mdash; already trigger-gated upstream</td></tr>
+        <tr class="hot"><td>fifo_usedw</td><td>in</td><td class="num">13</td><td><code>sample_fifo.wused</code> &mdash; <b>read, registered, compared</b></td><td>The credit check</td></tr>
+        <tr class="hot"><td>fifo_full</td><td>in</td><td class="num">1</td><td><code>sample_fifo.wfull</code></td><td>Concatenated above <code>usedw</code>; also forces <code>HOLDOFF</code></td></tr>
+        <tr class="hot"><td>fifo_write</td><td>buffer</td><td class="num">1</td><td><code>sample_fifo.wreq</code></td><td>Commit one 64-bit word</td></tr>
+        <tr><td>fifo_data</td><td>out</td><td class="num">64</td><td><code>sample_fifo.wdata</code></td><td>The packed word</td></tr>
+        <tr class="hot"><td>fifo_clear</td><td>buffer</td><td class="num">1</td><td><b>absent from the port map</b> &mdash; unconnected</td><td>Driven by the FSM, leaves the module nowhere; still gates overflow detection internally</td></tr>
+        <tr><td>meta_fifo_full</td><td>in</td><td class="num">1</td><td><code>meta_fifo.wfull</code></td><td>Second half of the credit check</td></tr>
+        <tr><td>meta_fifo_usedw</td><td>in</td><td class="num">11</td><td><code>meta_fifo.wused</code> &mdash; <b>read</b></td><td>Must be below 2044 of 2048</td></tr>
+        <tr><td>meta_fifo_data</td><td>out</td><td class="num">128</td><td><code>meta_fifo.wdata</code></td><td>Timestamp, flags, mini_exp, magic</td></tr>
+        <tr><td>meta_fifo_write</td><td>out</td><td class="num">1</td><td><code>meta_fifo.wreq</code></td><td>One header per DMA buffer</td></tr>
+        <tr><td>packet_control</td><td>in</td><td class="num">&mdash;</td><td><code>rx_packet_control</code>, from <code>rx_packet_generator</code></td><td>The RX side of packet mode <em>does</em> have a driver</td></tr>
+        <tr><td>packet_ready</td><td>out</td><td class="num">1</td><td><code>rx_packet_ready</code> &mdash; <b>read</b></td><td>Exactly <code>fifo_enough</code>, exported</td></tr>
+        <tr><td>overflow_count</td><td>buffer</td><td class="num">64</td><td><code>open</code></td><td>Same fate as the reader's underflow counter</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Two state machines, one interlock</h2>
+  <p class="sub">the sample FSM writes data; the meta FSM writes headers; neither runs alone</p>
+
+  <figure>
+    <svg viewBox="0 0 900 390" role="img" aria-label="Diagram of the two state machines in fifo_writer. The sample FSM on the left cycles CLEAR to WRITE_SAMPLES to HOLDOFF and back. The meta FSM on the right cycles IDLE to META_WRITE to META_DOWNCOUNT and back. The meta FSM gates the sample FSM through the meta_written bit, and each sample write decrements the meta FSM's DMA downcounter by two.">
+      <defs>
+        <marker id="wa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="wi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--indigo)"/>
+        </marker>
+        <marker id="wr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--rust)"/>
+        </marker>
+      </defs>
+
+      <text x="90" y="42" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="currentColor">SAMPLE FSM</text>
+      <text x="610" y="42" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="var(--rust)">META FSM</text>
+
+      <g font-family="JetBrains Mono, monospace" font-size="11.5" text-anchor="middle">
+        <rect x="90" y="60" width="160" height="46" fill="var(--surface)" stroke="currentColor"/><text x="170" y="88" fill="currentColor">CLEAR</text>
+        <rect x="90" y="160" width="160" height="46" fill="var(--surface)" stroke="var(--indigo)" stroke-width="1.5"/><text x="170" y="188" fill="var(--indigo)">WRITE_SAMPLES</text>
+        <rect x="90" y="262" width="160" height="46" fill="var(--surface)" stroke="currentColor"/><text x="170" y="290" fill="currentColor">HOLDOFF</text>
+
+        <rect x="610" y="60" width="160" height="46" fill="var(--surface)" stroke="currentColor"/><text x="690" y="88" fill="currentColor">IDLE</text>
+        <rect x="610" y="160" width="160" height="46" fill="var(--surface)" stroke="currentColor"/><text x="690" y="188" fill="currentColor">META_WRITE</text>
+        <rect x="610" y="262" width="160" height="46" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/><text x="690" y="290" fill="var(--rust)">META_DOWNCOUNT</text>
+      </g>
+
+      <line x1="170" y1="108" x2="170" y2="156" stroke="currentColor" stroke-width="1.25" marker-end="url(#wa)"/>
+      <text x="180" y="136" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">enable = 1</text>
+      <path d="M 120 208 L 120 258" fill="none" stroke="currentColor" stroke-width="1.25" marker-end="url(#wa)"/>
+      <text x="14" y="238" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">fifo_full</text>
+      <path d="M 220 258 L 220 208" fill="none" stroke="currentColor" stroke-width="1.25" marker-end="url(#wa)"/>
+      <text x="232" y="238" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">fifo_enough</text>
+
+      <line x1="690" y1="108" x2="690" y2="156" stroke="currentColor" stroke-width="1.25" marker-end="url(#wa)"/>
+      <text x="700" y="136" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">fifo_enough</text>
+      <line x1="690" y1="208" x2="690" y2="258" stroke="currentColor" stroke-width="1.25" marker-end="url(#wa)"/>
+      <text x="700" y="238" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">first valid sample</text>
+      <path d="M 770 285 L 830 285 L 830 83 L 774 83" fill="none" stroke="currentColor" stroke-width="1.25" marker-end="url(#wa)"/>
+      <text x="838" y="184" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" transform="rotate(-90 838 184)" text-anchor="middle">dma_downcount &#8804; 2 (or &#8804; 4 in MIMO)</text>
+
+      <line x1="606" y1="132" x2="256" y2="132" stroke="var(--rust)" stroke-width="1.5" marker-end="url(#wr)"/>
+      <text x="431" y="124" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--rust)" text-anchor="middle">meta_written = 1 &#8594; writes permitted</text>
+
+      <line x1="256" y1="330" x2="606" y2="330" stroke="var(--indigo)" stroke-width="1.5" marker-end="url(#wi)"/>
+      <text x="431" y="322" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--indigo)" text-anchor="middle">each fifo_write subtracts 2 from dma_downcount</text>
+
+      <line x1="14" y1="358" x2="886" y2="358" stroke="var(--rule)"/>
+      <text x="14" y="378" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">Not shown: WRITE_PACKET_PAYLOAD and PACKET_WAIT_EOP, reachable only in packet mode, which the SFCW build never enables.</text>
+    </svg>
+    <figcaption><b>The interlock in both directions.</b> The meta FSM must commit a header before any sample may be written; each sample write then counts down the message the header describes. Neither machine can run without the other.</figcaption>
+  </figure>
+
+  <p><strong>The interlock bit is <code>meta_written</code>.</strong> Samples must not enter the FIFO until the 128-bit header for the current message has been committed &mdash; otherwise the host would receive payload with no timestamp to label it. It is set when the header write actually happens, and cleared whenever the credit check fails. It is checked in exactly one place, at the top of the procedure that decides every write:</p>
+<pre>if( ((meta_current.<b>meta_written</b> = '1') or (meta_en = '0')) ) then
+    ...  <i>-- accumulate, pack, assert fifo_write</i>
+else
+    fifo_future.fifo_write &lt;= '0';
+end if;</pre>
+  <p>So with metadata enabled, <strong>no sample can enter the RX FIFO before the header that describes it</strong>. The ordering is structural, not a race the host has to tolerate. Chapter 5 noted that the metadata FIFO shares the RX FIFO's clear line specifically so the two cannot desynchronize; this is the other half of that guarantee.</p>
+
+  <h3 class="axis">Why the header waits for a sample</h3>
+  <p><code>META_WRITE</code> does not commit immediately. It waits for the <strong>first valid sample on any channel</strong>, then writes. That is deliberate: the header is built combinationally from the live counter every cycle, so committing it at the instant of the first sample makes the timestamp <em>be</em> that sample's timestamp, with no bookkeeping.</p>
+
+  <h3 class="axis">The two exit thresholds</h3>
+  <p><code>META_DOWNCOUNT</code> leaves at <code>dma_downcount &le; 2</code> &mdash; not zero. The reason is that samples keep flowing during the two cycles the FSM spends passing through <code>IDLE</code> and <code>META_WRITE</code>, because writes are gated on <code>meta_written</code> (still set) rather than on the meta FSM's state.</p>
+  <p>With one channel enabled, one write slips through that gap &mdash; 2 DWORDs. Threshold 2. But with <strong>both</strong> channels enabled a write happens on <em>every</em> valid cycle, so <strong>two</strong> writes slip through &mdash; 4 DWORDs. Hence the separate MIMO override that exits one write earlier, at <code>&le; 4</code>. Get this wrong and every header lands off the message boundary.</p>
+  <p>The override is a bolted-on branch, and its comment admits as much:</p>
+<pre><i>-- Patches the late meta write for MIMO mode</i>
+if( in_sample_controls'length = 2 and
+    in_sample_controls(0).enable = '1' and
+    in_sample_controls(1).enable = '1' and
+    eight_bit_mode_en = '0' and
+    meta_current.dma_downcount &lt;= NUM_STREAMS + 2 ) then
+    meta_future.state &lt;= IDLE;
+end if;</pre>
+  <p>Note how narrowly it is guarded: two streams, both enabled, and <em>not</em> eight-bit mode. It is written for exactly the configuration this board runs in, and steps over the ordinary <code>&le; 2</code> exit that the downcounter's stride of two can otherwise skip past.</p>
+</section>
+
+<section>
+  <h2>How samples get packed</h2>
+  <p class="sub">a right-shifting register with insertion at the top</p>
+  <p>All three packing modes work the same way: shift the accumulator right by one slot, insert the new sample at the top, once per enabled-and-valid channel. Since channel 0 is processed first, channel 1 ends up above it.</p>
+
+  <div class="scroller" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>Mode</th><th>63:48</th><th>47:32</th><th>31:16</th><th>15:0</th></tr></thead>
+      <tbody>
+        <tr class="hot"><td>SC16_Q11, 2 ch</td><td>Q1</td><td>I1</td><td>Q0</td><td>I0</td></tr>
+        <tr><td>SC16_Q11, 1 ch</td><td>Q0 newer</td><td>I0 newer</td><td>Q0 older</td><td>I0 older</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>In both cases the <strong>older or lower-numbered data occupies bits 31:0</strong> &mdash; which is exactly what the 32-bit FIFO read side emits first. The ordering is not arbitrary; it is what makes the host see samples in sequence.</p>
+
+  <h3 class="axis">The write cadence</h3>
+  <p>One counter governs everything: <code>samples_left = NUM_STREAMS &minus; enabled_channels</code>.</p>
+  <ul>
+    <li><strong>Two channels</strong> &rarr; 2 &minus; 2 = 0 &rarr; a write on <strong>every</strong> valid cycle.</li>
+    <li><strong>One channel</strong> &rarr; 2 &minus; 1 = 1 &rarr; one valid decrements, the next writes &rarr; a write every <strong>second</strong> valid cycle.</li>
+  </ul>
+  <p>8-bit mode halves it again via an alternating delay bit, since only 16 bits per sample instant are stored. The packed 12-bit mode is stranger still: it accumulates into a separate <strong>96-bit</strong> buffer and emits a sliding 64-bit window across it, writing on three cycles out of every four &mdash; eight IQ pairs become three 64-bit words with no waste.</p>
+
+  <div class="note">
+    <p class="h">Two inconsistencies in the source</p>
+    <p>The 16-bit and 8-bit packers read the <em>registered</em> copies of the input; the 12-bit packer reads the <strong>raw ports</strong>, running one cycle ahead. It works out because the window select reads the pre-insertion buffer, but it is fragile and unlike its siblings.</p>
+    <p>And if 8-bit and packed-12-bit were ever enabled together, the <strong>data path and the control path would pick different modes</strong> &mdash; the override orderings are reversed between them. Nothing in the HDL prevents it; it relies on the NIOS never setting both.</p>
+  </div>
+</section>
+
+<section>
+  <h2>The header it builds</h2>
+  <p class="sub">128 bits, recomputed every cycle, committed once per message</p>
+
+  <div class="scroller" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>Bits</th><th>Width</th><th>Content</th></tr></thead>
+      <tbody>
+        <tr><td>127:116</td><td class="num">12</td><td>constant <code>0xFFF</code></td></tr>
+        <tr><td>115:114</td><td class="num">2</td><td>constant <code>"11"</code></td></tr>
+        <tr class="hot"><td>113:112</td><td class="num">2</td><td><b>mini-expansion pin state</b>, synchronized</td></tr>
+        <tr><td>111:96</td><td class="num">16</td><td>placeholder &mdash; <b>overwritten downstream</b></td></tr>
+        <tr class="hot"><td>95:32</td><td class="num">64</td><td><b>timestamp</b></td></tr>
+        <tr><td>31:0</td><td class="num">32</td><td>magic <code>0x12344321</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The header is rebuilt combinationally <em>every cycle</em> from the live counter and re-registered, so whichever cycle the FSM chooses to commit, the timestamp is current. No latching, no staleness.</p>
+
+  <p><strong>The placeholder gets replaced on the way out.</strong> The GPIF interface overwrites bits 111:96 of the final word with the TX underrun flags &mdash; which is how a transmit-side problem reaches the host on a device with no reverse channel. Bits 127:112 pass through untouched.</p>
+
+  <h3 class="axis">The mini-expansion bits</h3>
+  <p>Two external digital pins are sampled through 3-flop synchronizers and stamped into <strong>every</strong> header, giving the host a per-message snapshot of them, time-stamped by the same header. They surface as <code>MINIEXP1</code> and <code>MINIEXP2</code> in the host's flags word.</p>
+  <p>Worth knowing: <strong><code>mini_exp1</code> is the same physical pin as the multi-board trigger line.</strong> So MINIEXP1 in your metadata is effectively a per-buffer record of the trigger state.</p>
+</section>
+
+<section>
+  <h2>The credit check &mdash; and why it does nothing in your build</h2>
+  <p class="sub">fifo_enough</p>
+  <p>Two terms, both re-registered before use:</p>
+<pre>if( fifo_full = '0' and
+    ((FIFO_MAX - fifo_used_v_r) &gt; dma_buf_size) and
+    ( (meta_en = '1' and meta_fifo_full = '0'
+        and (META_MAX - 4) &gt; meta_fifo_used_v_r)
+      or (meta_en = '0') ) ) then
+    fifo_enough &lt;= <b>true</b>;</pre>
+  <p>With <code>FIFO_MAX = 8192</code> and a SuperSpeed <code>dma_buf_size</code> of 2048, the sample term trips at <strong>6144 of 8192</strong>; the metadata term reserves <strong>4 of 2048</strong> header slots on top. The same signal is exported as <code>packet_ready</code>, so in packet mode the generator upstream sees the identical credit.</p>
+  <p>The reader has no counterpart to any of this. Its condition for popping is one word being present &mdash; no watermark, no headroom, no lookahead, and Chapter 6's <code>fifo_usedw</code> wired in and never read. <strong>TX flow control does not live in that module at all</strong>; it lives in <code>fx3_gpif</code>, which refuses to start a transfer above 6144 words (Chapter 4). RX flow control lives here.</p>
+  <div class="note">
+    <p class="h">Why the guard sits at a different end in each direction</p>
+    <p>The two directions fail differently. TX fails by <em>running dry</em>, which the FX3 side can prevent by keeping the FIFO topped up &mdash; a decision only the side holding the host buffers can make. RX fails by <em>overrunning</em>, which no upstream can prevent, because the ADC does not stop. So the only place a receive guard can work is immediately in front of the memory, and that is exactly where it is.</p>
+  </div>
+  <p>The flags are deliberately re-registered because the FIFO's outputs are unregistered and feed a wide subtract-and-compare. That costs staleness: counting the occupancy delay, the register stage, and the clocked comparison, <strong>the decision is about 3 cycles behind reality</strong>. The generous headroom absorbs it easily.</p>
+
+  <div class="note">
+    <p class="h">In plain SC16_Q11 mode, this check never throttles anything</p>
+    <p>The sample FSM leaves <code>WRITE_SAMPLES</code> on <code>fifo_full</code> <b>or</b> a missing header. With <code>meta_en = '0'</code> &mdash; the SFCW configuration &mdash; the second term is always false, so <strong>the only backpressure is the FIFO going genuinely full.</strong></p>
+    <p>The writer therefore fills the FIFO completely, <b>overflows</b>, and only then holds off. <code>fifo_enough</code> degrades to pure recovery hysteresis: it decides when <code>HOLDOFF</code> may release, not when writing should stop. With metadata on, writes stop <em>before</em> the FIFO fills. Without it, they stop <em>after</em>.</p>
+  </div>
+
+  <p>There is also a genuine unit mismatch in that first term: the occupancy is counted in <strong>64-bit words</strong> while <code>dma_buf_size</code> is in <strong>32-bit DWORDs</strong>. The check therefore demands roughly <strong>twice</strong> the headroom it means to &mdash; 16 KiB reserved for an 8 KiB message. Conservative in the safe direction, and it costs a quarter of the buffer.</p>
+</section>
+
+<section>
+  <h2>Overflow, and what is dead</h2>
+  <p class="sub">the detector, and a fair amount of logic that goes nowhere</p>
+  <p>Overflow is flagged when four things coincide: the block is enabled, a valid sample is present, the FIFO reports full, and the writer is not clearing. A rising-edge detector then counts contiguous runs as one event.</p>
+<pre>if( enable = '1' and <b>in_samples(in_samples'low).data_v = '1'</b> and
+    fifo_full = '1' and fifo_current.fifo_clear = '0' ) then</pre>
+  <p>Unlike the reader's underflow detector, which fires on a condition rather than a collision, this one requires valid data actually arriving at a full FIFO. But it examines only stream 0's valid. In every <code>rx_mux</code> mode the mux drives <code>data_v</code> for all streams from a common source, so on this board stream 0 pulses whenever stream 1 does. <em>Whether that remains true when the host enables channel 1 alone depends on how the ADI core drives its channel-0 valid, which is in the unfetched <code>no-OS</code> submodule and cannot be settled from this checkout.</em></p>
+
+  <h3 class="axis">The LED is off during the overflow</h3>
+  <p>This module and <code>fifo_reader</code> end with the same three processes &mdash; detect, count, hold an LED &mdash; and the counters are byte-for-byte equivalent. The one-shots are not. The difference is a single keyword:</p>
+<pre>overflow_led &lt;= '0';
+if( overflow_detected = '1' ) then
+    downcount := to_integer(overflow_duration);
+<b>elsif</b>( downcount /= 0 ) then
+    downcount := downcount - 1;
+    overflow_led &lt;= '1';
+end if;</pre>
+  <p>Chapter 6 shows the reader's version, where the reload is a separate <code>if</code> and the decrement runs regardless. Here the reload <em>is</em> the taken branch, so while <code>overflow_detected</code> is high every cycle the decrement never executes and <code>overflow_led</code> never rises.</p>
+  <div class="note">
+    <p class="h">What that means at the front panel</p>
+    <p>A sustained TX underflow lights its LED and holds it. <strong>A sustained RX overflow leaves its LED dark</strong> &mdash; it comes on only once the overflow <em>stops</em>, then holds for 65535 clocks. The RX LED reports that an overflow ended, not that one is happening. Chapter 2's finding that the FPGA exposes no RX overrun status bit is the other half of this: the LED is the only fabric-level indication there is, and it is off for the duration of the event.</p>
+  </div>
+
+  <div class="mods">
+    <div class="mod"><div class="mod-name">It watches channel 0 only</div><div class="mod-src">note</div><div class="mod-job">As above: the detector reads only the <b>first</b> stream's valid. It does not OR across channels, does not check that channel's enable, and is not gated on whether a write was attempted. A configuration where only channel 1 was live could go undetected.</div></div>
+    <div class="mod"><div class="mod-name">overflow_count &#8594; open</div><div class="mod-src">dead</div><div class="mod-job">A 64-bit counter and its edge-detect flop are built &mdash; carefully, with the discontinuity filter that makes a run of consecutive failures count once &mdash; and then <b>left unconnected</b> at the instantiation. Synthesis removes the lot. The FPGA does count overruns and then declines to tell anyone.</div></div>
+    <div class="mod"><div class="mod-name">Only an LED escapes</div><div class="mod-src">note</div><div class="mod-job">The single bit that reaches the outside world is the one-shot above. <b>There is no register, no NIOS status bit, and no host-visible flag.</b> In plain SC16_Q11 mode the board LED is the <em>only</em> indication of RX overflow that exists &mdash; and per the finding above, it is dark while the overflow is in progress.</div></div>
+    <div class="mod"><div class="mod-name">fifo_data and fifo_12b_buf reset to <code>'-'</code></div><div class="mod-src">note</div><div class="mod-job">Synthesis don't-cares rather than zeros, the same idiom as <code>meta_p_time</code> in the reader. Each is written before it is read, so nothing breaks &mdash; but simulation and hardware need not agree on the first cycle after reset.</div></div>
+    <div class="mod"><div class="mod-name">fifo_clear unassociated</div><div class="mod-src">dead</div><div class="mod-job">The writer generates a FIFO-clear signal and the instantiation simply <b>omits the port</b>. The register survives only because an internal consumer reads the record field. The FIFO's real flush comes from a different domain entirely &mdash; the inverted RX enable, in PCLK. The writer's own clear capability is unused.</div></div>
+    <div class="mod"><div class="mod-name">Packet states</div><div class="mod-src">inert</div><div class="mod-job">Two of the four states in each FSM exist only for packet mode, which this build never enables. One of them, <code>WRITE_PACKET_PAYLOAD</code>, also has <b>no exit</b> other than a full disable &mdash; dropping packet mode mid-stream would wedge the FSM.</div></div>
+    <div class="mod"><div class="mod-name">The header keeps building</div><div class="mod-src">waste</div><div class="mod-job">Even with metadata off, the 128-bit header register is recomputed and re-latched every single cycle; only the write strobe is suppressed. And since the timestamp counter is held in reset in that mode, what it latches is zeros.</div></div>
+  </div>
+
+  <h3 class="axis">Two hazards worth recording</h3>
+  <p><code>HOLDOFF</code> freezes the 12-bit packing phase but <strong>not</strong> the sample accumulator or its counter. In the single-channel case, an odd number of samples shifting through during a holdoff would swap which sample lands in the high versus low half of the word on resume. Derived from the source; not observed.</p>
+  <p>And the credit check's subtraction can wrap for one cycle as the full flag deasserts, briefly asserting <code>fifo_enough</code> while the FIFO is still nearly full. A one-cycle window that the full flag immediately closes.</p>
+</section>

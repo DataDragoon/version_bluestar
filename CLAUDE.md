@@ -313,14 +313,24 @@ load today. Gated on fixing the META format above.
 
 ## FPGA Guide — published reference doc (docs/fpga-guide/)
 
-A five-chapter technical guide to the bladeRF hosted FPGA image, published as a Claude
+A seven-chapter technical guide to the bladeRF hosted FPGA image, published as a Claude
 Artifact and **rebuildable from this repo**:
 
   https://claude.ai/code/artifact/cd0df1ad-2556-428f-a75a-1b02b4236619
 
 Chapters: 01 module inventory · 02 sample round trip (USB→RF→USB) · 03 the NIOS
-(pins, functions, boot/shutdown) · 04 the TX FIFO · 05 the RX FIFO. Single page, sticky
-chapter index, print styles for PDF export.
+(pins, functions, boot/shutdown) · 04 the TX FIFO · 05 the RX FIFO · 06 `fifo_reader`
+(the sample reader) · 07 `fifo_writer` (the sample packer). Single page, sticky chapter
+index, print styles for PDF export.
+
+Two findings from ch 06/07 that bear on sweep work: an idle TX **keeps radiating** — the
+DAC register's clock enable *is* `data_v`, so on underrun it parks on the last sample and
+emits an unmodulated carrier at the LO (libbladeRF requires the last **two** samples of a
+burst be zero, two because one 64-bit word holds two samples). And in plain `SC16_Q11`,
+`fifo_writer`'s `fifo_enough` credit check **never throttles** — `WRITE_SAMPLES` exits
+only on the FIFO going genuinely full, so the writer fills, overflows, *then* holds off;
+the RX overflow LED is dark for the whole event (its one-shot reloads in an `elsif`) and
+there is no host-visible overrun bit at all.
 
 Sources live in `docs/fpga-guide/`: one `chN.frag.html` per chapter, `base-head.html`
 for shared CSS, `index.frag.html` for front/back matter, and `build_guide.py`.
