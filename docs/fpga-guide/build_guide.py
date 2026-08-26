@@ -68,7 +68,8 @@ CHAPTERS = [
             'switched off.',
         tally=[('99', 'system ports'), ('19', 'bus slaves'),
                ('9', 'packet families'), ('0', 'lines of assembly')],
-        nav=['What it is', 'Life and death', 'The pins', 'What it does',
+        nav=['What it is', 'Life and death', 'The pins', 'The Avalon bus',
+             'What it does',
              'Assembly &amp; toolchain', 'The VHDL it drives', 'Dead code &amp; defects'],
     ),
     dict(
@@ -109,6 +110,15 @@ CHAPTERS = [
                ('4', 'header slots reserved'), ('1', 'LED, no register')],
         nav=['What it is', 'Two machines, one interlock', 'How samples get packed',
              'The header it builds', 'The credit check', 'Overflow and dead code'],
+    ),
+    dict(
+        id='ch8', num='08', title='The Whole Machine', frag='ch8.frag.html', prefix='a',
+        dek='The overview the first seven chapters build up to &mdash; the board as two '
+            'independent planes, the major control and read/write signals of each, and the '
+            'two places they meet.',
+        tally=[('2', 'planes'), ('2', 'places they meet'),
+               ('1.8 &micro;s', 'of a 500 &micro;s retune'), ('4', 'silent failures')],
+        nav=['Two planes that never touch', 'The control plane', 'The data plane'],
     ),
 ]
 

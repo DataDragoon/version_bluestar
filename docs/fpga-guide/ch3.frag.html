@@ -131,6 +131,151 @@ while (run_nios) { ... }</pre>
 </section>
 
 <section>
+  <h2>The Avalon bus, drawn out</h2>
+  <p class="sub">every slave the NIOS can reach, and the signals it reaches them with</p>
+  <p>The table above is the address map; this is the topology. Everything the CPU can touch hangs off a <strong>Qsys-generated Avalon-MM interconnect</strong> &mdash; there is no hand-written bus anywhere in the source, only the <code>add_connection</code> lines in <code>nios_system.tcl</code> that declare who talks to whom.</p>
+
+  <figure>
+    <svg viewBox="0 0 960 796" role="img" aria-label="Block diagram of the Avalon memory-mapped bus inside nios_system. On the left the Nios two-slash-e CPU exposes an instruction master, a data master and an interrupt receiver. The instruction master reaches only the debug module and on-chip RAM. The data master reaches nineteen slaves through the Qsys interconnect, grouped into memory, host command path, RF control, timing, triggers and expansion, and non-functional blocks. Ten interrupt lines return from the slaves to the CPU.">
+      <defs>
+        <marker id="av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="avr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--rust)"/>
+        </marker>
+      </defs>
+
+      <rect x="14" y="24" width="932" height="700" fill="none" stroke="var(--indigo)" stroke-width="1.5" stroke-dasharray="7 4"/>
+      <text x="26" y="44" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="var(--indigo)">nios_system &#183; Qsys &#183; everything here runs on sys_clock 80 MHz</text>
+
+      <rect x="30" y="250" width="152" height="150" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+      <text x="106" y="286" font-family="Archivo, sans-serif" font-size="14" font-weight="700" fill="currentColor" text-anchor="middle">nios2</text>
+      <text x="106" y="304" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle">II/e &#183; Tiny</text>
+      <text x="106" y="320" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle">no cache, no MMU</text>
+      <text x="106" y="336" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle">~6 cy / instruction</text>
+      <text x="106" y="362" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--rust)" text-anchor="middle">reset_reset_n tied high</text>
+      <text x="106" y="376" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--rust)" text-anchor="middle">never reset</text>
+
+      <text x="192" y="146" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">instruction_master</text>
+      <path d="M 106 248 L 106 152 L 244 152" fill="none" stroke="currentColor" stroke-width="1.25" marker-end="url(#av)"/>
+
+      <text x="192" y="322" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor">data_master</text>
+      <line x1="184" y1="330" x2="244" y2="330" stroke="currentColor" stroke-width="2.5" marker-end="url(#av)"/>
+
+      <text x="192" y="536" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--rust)">irq &#183; 10 lines</text>
+      <path d="M 244 544 L 106 544 L 106 402" fill="none" stroke="var(--rust)" stroke-width="1.5" marker-end="url(#avr)"/>
+
+      <rect x="248" y="100" width="72" height="596" fill="var(--indigo)" opacity=".12"/>
+      <rect x="248" y="100" width="72" height="596" fill="none" stroke="var(--indigo)" stroke-width="1.25"/>
+      <text x="284" y="380" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="var(--indigo)" text-anchor="middle" transform="rotate(-90 284 380)">Avalon-MM interconnect</text>
+      <text x="284" y="404" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle" transform="rotate(-90 284 404)">generated, not written</text>
+
+      <text x="330" y="76" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--ink-2)">per-slave bundle: address &#183; writedata[31:0] &#183; readdata[31:0] &#183; read &#183; write &#183; byteenable[3:0] &#183; waitrequest</text>
+
+      <text x="336" y="122" font-family="Archivo, sans-serif" font-size="10" font-weight="700" fill="var(--slate)">MEMORY &#183; reached by BOTH masters</text>
+      <rect x="336" y="132" width="264" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="346" y="154" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">ram</text>
+      <text x="592" y="154" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x00020000 &#183; 128 KB</text>
+      <rect x="620" y="132" width="308" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="630" y="154" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">nios2.debug_mem_slave</text>
+      <text x="920" y="154" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x8800</text>
+      <line x1="324" y1="149" x2="332" y2="149" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="600" y1="149" x2="616" y2="149" stroke="currentColor" stroke-width="1.25"/>
+
+      <text x="336" y="200" font-family="Archivo, sans-serif" font-size="10" font-weight="700" fill="var(--rust)">HOST COMMAND PATH</text>
+      <rect x="336" y="210" width="264" height="34" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="346" y="232" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">command_uart</text>
+      <text x="592" y="232" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)" text-anchor="end">0x9120 &#183; IRQ 7</text>
+      <rect x="620" y="210" width="308" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="630" y="232" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">jtag_uart</text>
+      <text x="920" y="232" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x9100 &#183; IRQ 1</text>
+      <line x1="324" y1="227" x2="332" y2="227" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="600" y1="227" x2="616" y2="227" stroke="currentColor" stroke-width="1.25"/>
+
+      <text x="336" y="278" font-family="Archivo, sans-serif" font-size="10" font-weight="700" fill="var(--rust)">RF CONTROL &#183; every retune goes through here</text>
+      <rect x="336" y="288" width="264" height="34" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="346" y="310" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">rffe_spi</text>
+      <text x="592" y="310" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)" text-anchor="end">0x9200 &#183; IRQ 8</text>
+      <rect x="620" y="288" width="308" height="34" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="630" y="310" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">gpio_rffe_0</text>
+      <text x="920" y="310" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)" text-anchor="end">0x9440 &#183; IRQ 9</text>
+      <rect x="336" y="328" width="264" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="346" y="350" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">peripheral_spi</text>
+      <text x="592" y="350" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x9060 &#183; IRQ 4</text>
+      <rect x="620" y="328" width="308" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="630" y="350" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">axi_ad9361_0</text>
+      <text x="920" y="350" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x00010000</text>
+      <rect x="336" y="368" width="264" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="346" y="390" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">control</text>
+      <text x="592" y="390" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x9040 &#183; meta_sync</text>
+      <rect x="620" y="368" width="308" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="630" y="390" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">opencores_i2c</text>
+      <text x="920" y="390" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x90f0 &#183; IRQ 5</text>
+      <line x1="324" y1="305" x2="332" y2="305" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="324" y1="345" x2="332" y2="345" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="324" y1="385" x2="332" y2="385" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="600" y1="305" x2="616" y2="305" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="600" y1="345" x2="616" y2="345" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="600" y1="385" x2="616" y2="385" stroke="currentColor" stroke-width="1.25"/>
+
+      <text x="336" y="436" font-family="Archivo, sans-serif" font-size="10" font-weight="700" fill="var(--rust)">TIMING &#183; the tamers</text>
+      <rect x="336" y="446" width="264" height="34" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="346" y="468" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">rx_tamer</text>
+      <text x="592" y="468" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)" text-anchor="end">0x9160 &#183; IRQ 3</text>
+      <rect x="620" y="446" width="308" height="34" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="630" y="468" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">tx_tamer</text>
+      <text x="920" y="468" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)" text-anchor="end">0x9140 &#183; IRQ 2</text>
+      <text x="336" y="498" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">counter side runs on l_clk, register side here &#8212; a handshake crosses between them</text>
+      <line x1="324" y1="463" x2="332" y2="463" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="600" y1="463" x2="616" y2="463" stroke="currentColor" stroke-width="1.25"/>
+
+      <text x="336" y="534" font-family="Archivo, sans-serif" font-size="10" font-weight="700" fill="var(--slate)">TRIGGERS &amp; EXPANSION</text>
+      <rect x="336" y="544" width="264" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="346" y="566" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">rx_trigger_ctl</text>
+      <text x="592" y="566" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x9400</text>
+      <rect x="620" y="544" width="308" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="630" y="566" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">tx_trigger_ctl</text>
+      <text x="920" y="566" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x9420</text>
+      <rect x="336" y="584" width="264" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="346" y="606" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">xb_gpio</text>
+      <text x="592" y="606" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x90b0</text>
+      <rect x="620" y="584" width="308" height="34" fill="var(--surface)" stroke="currentColor"/>
+      <text x="630" y="606" font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor">xb_gpio_dir</text>
+      <text x="920" y="606" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x90a0</text>
+      <line x1="324" y1="561" x2="332" y2="561" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="324" y1="601" x2="332" y2="601" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="600" y1="561" x2="616" y2="561" stroke="currentColor" stroke-width="1.25"/>
+      <line x1="600" y1="601" x2="616" y2="601" stroke="currentColor" stroke-width="1.25"/>
+
+      <text x="336" y="654" font-family="Archivo, sans-serif" font-size="10" font-weight="700" fill="var(--slate)">ON THE BUS, BUT NOT DOING WHAT THE NAME SUGGESTS</text>
+      <rect x="336" y="664" width="264" height="34" fill="var(--surface)" stroke="var(--rule-2)" stroke-dasharray="4 3"/>
+      <text x="346" y="686" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--slate)">vctcxo_tamer_0</text>
+      <text x="592" y="686" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="end">0x9300 &#183; plain RAM</text>
+      <rect x="620" y="664" width="146" height="34" fill="var(--surface)" stroke="var(--rule-2)" stroke-dasharray="4 3"/>
+      <text x="630" y="686" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--slate)">arbiter_0</text>
+      <text x="758" y="686" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="end">0x9500 &#183; IRQ 6</text>
+      <rect x="782" y="664" width="146" height="34" fill="var(--surface)" stroke="var(--rule-2)" stroke-dasharray="4 3"/>
+      <text x="792" y="682" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--slate)">wishbone_master_0</text>
+      <text x="920" y="694" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="end">0x10000000 &#183; IRQ 10</text>
+      <line x1="324" y1="681" x2="332" y2="681" stroke="var(--rule-2)" stroke-width="1.25"/>
+      <line x1="600" y1="681" x2="616" y2="681" stroke="var(--rule-2)" stroke-width="1.25"/>
+      <line x1="766" y1="681" x2="778" y2="681" stroke="var(--rule-2)" stroke-width="1.25"/>
+
+      <line x1="14" y1="744" x2="946" y2="744" stroke="var(--rule)"/>
+      <text x="14" y="764" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">Thick line = data_master, 19 slaves. Thin line at top = instruction_master, 2 slaves &#8212; code runs only from on-chip RAM.</text>
+      <text x="14" y="779" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">Rust = raises an interrupt the firmware services. Dashed = on the bus but non-functional or misnamed. IRQ 0 is unused.</text>
+    </svg>
+    <figcaption><b>The whole address space, as topology.</b> Ten of the nineteen slaves raise an interrupt. The interconnect itself is generated by Qsys from <code>nios_system.tcl</code>, so the exact signal subset per slave varies &mdash; a PIO has no <code>waitrequest</code>, the SPI cores do.</figcaption>
+  </figure>
+
+  <h3 class="axis">What the picture shows that the table does not</h3>
+  <p><strong>The retune path is three boxes wide.</strong> A frequency change is the CPU writing <code>rffe_spi</code> for the AD9361 registers, then <code>gpio_rffe_0</code> for the SPDT band switches, with <code>rx_tamer</code> / <code>tx_tamer</code> deciding <em>when</em> if the retune is scheduled rather than immediate. Nothing else on the bus participates.</p>
+  <p><strong>Nothing on this bus can reach a FIFO.</strong> The sample FIFOs, <code>fifo_reader</code>, <code>fifo_writer</code> and <code>fx3_gpif</code> are hand-instantiated in VHDL outside the Qsys system entirely. They have no base address, and the NIOS cannot read or write them. That is the structural reason every sample-path fault in Chapters 4 to 7 is invisible to the firmware &mdash; there is no register for it to look at, only an LED.</p>
+  <p><strong>Three slaves are on the bus under false pretences.</strong> <code>vctcxo_tamer_0</code> is a plain 256-byte memory on this board rather than the Nuand tamer IP, so its ISR can never fire; <code>arbiter_0</code> has its fabric-facing channel absent from the port map and IRQ 6 wired with no handler registered; and <code>wishbone_master_0</code>'s ten conduit ports map to top-level signals nothing drives, so a read would hang the data master waiting for an acknowledge that never arrives.</p>
+</section>
+
+<section>
   <h2>What it does</h2>
   <p class="sub">nine packet families, with a real example of each</p>
   <p>Everything the NIOS does happens in one of two places, and the distinction governs performance:</p>

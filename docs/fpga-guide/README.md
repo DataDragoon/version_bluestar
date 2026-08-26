@@ -5,18 +5,19 @@ Published as a Claude Artifact:
 
 **https://claude.ai/code/artifact/cd0df1ad-2556-428f-a75a-1b02b4236619**
 
-Seven chapters, one page, sticky chapter index down the left side, print styles so
+Eight chapters, one page, sticky chapter index down the left side, print styles so
 Ctrl-P → Save as PDF gives a clean document.
 
 | Ch | Title | Fragment | Section id prefix |
 |----|-------|----------|-------------------|
 | 01 | The Module Inventory | `ch1.frag.html` | `m1`…`m7` |
 | 02 | The Round Trip | `ch2.frag.html` | `r1`…`r5` |
-| 03 | The NIOS | `ch3.frag.html` | `n1`…`n7` |
+| 03 | The NIOS | `ch3.frag.html` | `n1`…`n8` |
 | 04 | The TX FIFO | `ch4.frag.html` | `t1`…`t6` |
 | 05 | The RX FIFO | `ch5.frag.html` | `x1`…`x6` |
-| 06 | The Sample Reader | `ch6.frag.html` | `d1`…`d6` |
+| 06 | The Sample Reader | `ch6.frag.html` | `d1`…`d7` |
 | 07 | The Sample Packer | `ch7.frag.html` | `w1`…`w6` |
+| 08 | The Whole Machine | `ch8.frag.html` | `a1`…`a3` |
 
 Chapters 4/5 are the two FIFOs as *storage*; 6/7 are the two modules that drive them
 from the AD9361 side. They cross-reference each other heavily — several findings are

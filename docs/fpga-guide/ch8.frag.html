@@ -1,0 +1,237 @@
+<section>
+  <h2>Two planes that never touch</h2>
+  <p class="sub">the whole machine on one page &#183; control above, samples below</p>
+  <p>Seven chapters of detail resolve into a simpler claim than the parts suggest. The board is <strong>two independent planes</strong> that share a package and almost nothing else:</p>
+  <ul>
+    <li>A <strong>control plane</strong> &mdash; host command packets to the NIOS, over the Avalon bus, out through SPI and GPIO to the AD9361's registers. It decides <em>frequency, gain, bandwidth, mode</em>. It never touches a sample.</li>
+    <li>A <strong>data plane</strong> &mdash; IQ samples over the GPIF bus, through FIFOs, through the reader and writer, across LVDS to the converters. It carries <em>everything</em> and understands nothing. No CPU is involved at any point.</li>
+  </ul>
+  <p>They meet in exactly two places: inside the <strong>FX3</strong>, which multiplexes both onto one USB cable using different endpoints, and inside the <strong>AD9361</strong>, where a register written by the control plane changes what the data plane receives. Nowhere in the FPGA do they share a wire.</p>
+
+  <figure>
+    <svg viewBox="0 0 1000 700" role="img" aria-label="Overview architecture of the bladeRF 2.0 micro. The host connects by USB to the FX3, which splits traffic into a control endpoint feeding a 4 megabaud UART and a sample endpoint feeding the 32-bit GPIF bus. Inside the FPGA, the upper control plane runs command_uart into the Nios CPU, out through the Avalon interconnect to rffe_spi and gpio_rffe, which drive the AD9361 register bus and the band switches. The lower data plane runs fx3_gpif into the TX FIFO, fifo_reader and axi_ad9361 toward the DAC, and back from the ADC through axi_ad9361, rx_mux, fifo_writer and the RX FIFO. Between them sit the TX and RX time tamers, readable by the CPU and feeding timestamps to the reader and writer.">
+      <defs>
+        <marker id="oa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="oi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--indigo)"/>
+        </marker>
+        <marker id="orr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--rust)"/>
+        </marker>
+      </defs>
+
+      <rect x="222" y="40" width="658" height="620" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="7 4"/>
+      <text x="234" y="60" font-family="Archivo, sans-serif" font-size="11" font-weight="700" fill="currentColor">FPGA &#183; Cyclone V</text>
+
+      <rect x="230" y="72" width="642" height="188" fill="var(--indigo)" opacity=".08"/>
+      <text x="240" y="90" font-family="Archivo, sans-serif" font-size="11" font-weight="700" fill="var(--indigo)">CONTROL PLANE &#183; sys_clock 80 MHz &#183; no sample ever enters here</text>
+
+      <rect x="230" y="336" width="642" height="314" fill="var(--rust)" opacity=".08"/>
+      <text x="240" y="354" font-family="Archivo, sans-serif" font-size="11" font-weight="700" fill="var(--rust)">DATA PLANE &#183; fx3_pclk then l_clk &#183; no CPU involved at any point</text>
+
+      <rect x="10" y="300" width="82" height="80" fill="var(--surface)" stroke="currentColor" stroke-width="1.5"/>
+      <text x="51" y="332" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="currentColor" text-anchor="middle">Host</text>
+      <text x="51" y="350" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">Raspberry Pi</text>
+      <text x="51" y="364" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">libbladeRF</text>
+
+      <rect x="110" y="264" width="96" height="152" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="158" y="286" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="var(--rust)" text-anchor="middle">FX3</text>
+      <rect x="120" y="298" width="76" height="42" fill="none" stroke="var(--indigo)"/>
+      <text x="158" y="315" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--indigo)" text-anchor="middle">EP 0x02/0x82</text>
+      <text x="158" y="330" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">control</text>
+      <rect x="120" y="350" width="76" height="42" fill="none" stroke="var(--rust)"/>
+      <text x="158" y="367" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--rust)" text-anchor="middle">EP 0x01/0x81</text>
+      <text x="158" y="382" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">samples</text>
+      <text x="158" y="408" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">supplies fx3_pclk</text>
+
+      <line x1="94" y1="340" x2="106" y2="340" stroke="currentColor" stroke-width="1.5" marker-end="url(#oa)" marker-start="url(#oa)"/>
+      <text x="100" y="286" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">USB</text>
+
+      <path d="M 198 306 L 214 306 L 214 138 L 232 138" fill="none" stroke="var(--indigo)" stroke-width="1.5" marker-end="url(#oi)"/>
+      <text x="222" y="128" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--indigo)">UART 4 Mbaud &#183; 16 B packets</text>
+
+      <path d="M 198 372 L 214 372 L 214 470 L 232 470" fill="none" stroke="var(--rust)" stroke-width="2.5" marker-end="url(#orr)" marker-start="url(#orr)"/>
+      <text x="222" y="500" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--rust)">fx3_gpif[31:0] &#183; half duplex</text>
+      <text x="222" y="512" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)">fx3_ctl[12:0]</text>
+
+      <rect x="236" y="116" width="104" height="44" fill="var(--surface)" stroke="currentColor"/>
+      <text x="288" y="136" font-family="JetBrains Mono, monospace" font-size="10" fill="currentColor" text-anchor="middle">command_uart</text>
+      <text x="288" y="151" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--rust)" text-anchor="middle">IRQ 7</text>
+
+      <rect x="366" y="116" width="104" height="44" fill="var(--surface)" stroke="var(--indigo)" stroke-width="1.5"/>
+      <text x="418" y="136" font-family="JetBrains Mono, monospace" font-size="10" fill="currentColor" text-anchor="middle">nios2</text>
+      <text x="418" y="151" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">II/e &#183; 80 MHz</text>
+      <line x1="342" y1="138" x2="362" y2="138" stroke="currentColor" stroke-width="1.25" marker-end="url(#oa)" marker-start="url(#oa)"/>
+
+      <rect x="496" y="96" width="46" height="150" fill="var(--indigo)" opacity=".18"/>
+      <rect x="496" y="96" width="46" height="150" fill="none" stroke="var(--indigo)"/>
+      <text x="519" y="176" font-family="Archivo, sans-serif" font-size="9.5" font-weight="700" fill="var(--indigo)" text-anchor="middle" transform="rotate(-90 519 176)">Avalon-MM</text>
+      <line x1="472" y1="138" x2="492" y2="138" stroke="var(--indigo)" stroke-width="2.5" marker-end="url(#oi)" marker-start="url(#oi)"/>
+      <text x="482" y="112" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--indigo)" text-anchor="middle">addr / rd / wr</text>
+
+      <rect x="576" y="100" width="150" height="34" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="586" y="121" font-family="JetBrains Mono, monospace" font-size="10" fill="currentColor">rffe_spi</text>
+      <text x="718" y="121" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="end">40 MHz</text>
+      <rect x="576" y="142" width="150" height="34" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="586" y="163" font-family="JetBrains Mono, monospace" font-size="10" fill="currentColor">gpio_rffe_0</text>
+      <text x="718" y="163" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="end">32-bit PIO</text>
+      <rect x="576" y="184" width="150" height="34" fill="var(--surface)" stroke="var(--rule-2)" stroke-dasharray="4 3"/>
+      <text x="586" y="205" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">15 more slaves</text>
+      <line x1="544" y1="117" x2="572" y2="117" stroke="currentColor" stroke-width="1.25" marker-end="url(#oa)"/>
+      <line x1="544" y1="159" x2="572" y2="159" stroke="currentColor" stroke-width="1.25" marker-end="url(#oa)"/>
+      <line x1="544" y1="201" x2="572" y2="201" stroke="var(--rule-2)" stroke-width="1.25"/>
+
+      <path d="M 728 117 L 800 117 L 800 300 L 886 300" fill="none" stroke="var(--rust)" stroke-width="1.5" marker-end="url(#orr)"/>
+      <text x="806" y="112" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--rust)">sclk mosi miso cs_n</text>
+      <path d="M 728 159 L 782 159 L 782 320 L 886 320" fill="none" stroke="var(--rust)" stroke-width="1.5" marker-end="url(#orr)"/>
+      <text x="788" y="176" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--rust)">SPDT &#183; TXNRX &#183; ENABLE</text>
+
+      <text x="240" y="284" font-family="Archivo, sans-serif" font-size="10" font-weight="700" fill="var(--slate)">TIMING &#183; the only block both planes can see</text>
+      <rect x="366" y="292" width="104" height="30" fill="var(--surface)" stroke="var(--rust)"/>
+      <text x="418" y="312" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">tx_tamer</text>
+      <rect x="366" y="326" width="104" height="30" fill="var(--surface)" stroke="var(--rust)"/>
+      <text x="418" y="346" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">rx_tamer</text>
+      <path d="M 519 248 L 519 307 L 474 307" fill="none" stroke="var(--indigo)" stroke-width="1.25" marker-end="url(#oi)" marker-start="url(#oi)"/>
+      <text x="528" y="278" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--indigo)">read ts / write compare</text>
+      <text x="528" y="291" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--indigo)">IRQ 2 &#183; IRQ 3</text>
+
+      <rect x="236" y="424" width="104" height="92" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="288" y="464" font-family="JetBrains Mono, monospace" font-size="10" fill="currentColor" text-anchor="middle">fx3_gpif</text>
+      <text x="288" y="480" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">arbitration</text>
+      <text x="288" y="493" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">+ watermarks</text>
+
+      <rect x="366" y="382" width="94" height="40" fill="var(--surface)" stroke="currentColor"/>
+      <text x="413" y="400" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">tx_fifo</text>
+      <text x="413" y="414" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">32&#8594;64 &#183; 32 KiB</text>
+      <path d="M 342 448 L 354 448 L 354 402 L 362 402" fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#oa)"/>
+      <text x="300" y="416" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)">wdata / wreq</text>
+
+      <rect x="486" y="382" width="104" height="40" fill="var(--surface)" stroke="var(--indigo)" stroke-width="1.5"/>
+      <text x="538" y="400" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">fifo_reader</text>
+      <text x="538" y="414" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">unpack + gate</text>
+      <line x1="462" y1="402" x2="482" y2="402" stroke="currentColor" stroke-width="2" marker-end="url(#oa)"/>
+      <text x="472" y="436" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">rdata / rreq</text>
+      <text x="472" y="448" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">rempty</text>
+
+      <rect x="366" y="576" width="94" height="40" fill="var(--surface)" stroke="currentColor"/>
+      <text x="413" y="594" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">rx_fifo</text>
+      <text x="413" y="608" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">64&#8594;32 &#183; 64 KiB</text>
+      <path d="M 362 596 L 354 596 L 354 492 L 342 492" fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#oa)"/>
+      <text x="300" y="540" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)">q / rdreq</text>
+      <text x="300" y="552" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)">rdusedw</text>
+
+      <rect x="486" y="576" width="104" height="40" fill="var(--surface)" stroke="var(--indigo)" stroke-width="1.5"/>
+      <text x="538" y="594" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">fifo_writer</text>
+      <text x="538" y="608" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">pack + header</text>
+      <line x1="482" y1="596" x2="462" y2="596" stroke="currentColor" stroke-width="2" marker-end="url(#oa)"/>
+      <text x="472" y="630" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">wdata / wreq</text>
+      <text x="472" y="642" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">wfull / wusedw</text>
+
+      <rect x="616" y="576" width="80" height="40" fill="var(--surface)" stroke="currentColor"/>
+      <text x="656" y="600" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">rx_mux</text>
+      <line x1="612" y1="596" x2="594" y2="596" stroke="currentColor" stroke-width="2" marker-end="url(#oa)"/>
+
+      <path d="M 418 358 L 418 370 L 470 370 L 470 392 L 482 392" fill="none" stroke="var(--rust)" stroke-width="1.25" marker-end="url(#orr)"/>
+      <text x="424" y="368" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--rust)">tx_timestamp[63:0]</text>
+      <path d="M 344 341 L 330 341 L 330 566 L 470 566 L 470 586 L 482 586" fill="none" stroke="var(--rust)" stroke-width="1.25" marker-end="url(#orr)"/>
+      <text x="336" y="562" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--rust)">rx_timestamp[63:0]</text>
+
+      <rect x="726" y="420" width="104" height="176" fill="var(--surface)" stroke="var(--indigo)" stroke-width="1.5"/>
+      <text x="778" y="500" font-family="JetBrains Mono, monospace" font-size="10" fill="currentColor" text-anchor="middle">axi_ad9361</text>
+      <text x="778" y="516" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">SERDES 4:1</text>
+      <text x="778" y="530" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--rust)" text-anchor="middle">emits l_clk</text>
+      <path d="M 594 402 L 700 402 L 700 452 L 722 452" fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#oa)"/>
+      <text x="620" y="396" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)">dac_streams &#183; data_v</text>
+      <path d="M 722 560 L 706 560 L 706 596 L 700 596" fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#oa)"/>
+      <text x="620" y="566" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)">adc_streams &#183; data_v</text>
+
+      <rect x="886" y="264" width="96" height="332" fill="var(--surface)" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="934" y="292" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="var(--rust)" text-anchor="middle">AD9361</text>
+      <text x="934" y="340" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">registers</text>
+      <line x1="894" y1="352" x2="974" y2="352" stroke="var(--rule-2)"/>
+      <text x="934" y="452" font-family="JetBrains Mono, monospace" font-size="9" fill="currentColor" text-anchor="middle">DAC</text>
+      <text x="934" y="472" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">TX1 / TX2</text>
+      <text x="934" y="546" font-family="JetBrains Mono, monospace" font-size="9" fill="currentColor" text-anchor="middle">ADC</text>
+      <text x="934" y="566" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">RX1 / RX2</text>
+      <line x1="834" y1="452" x2="882" y2="452" stroke="currentColor" stroke-width="2" marker-end="url(#oa)"/>
+      <line x1="882" y1="560" x2="834" y2="560" stroke="currentColor" stroke-width="2" marker-end="url(#oa)"/>
+      <text x="858" y="446" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">LVDS</text>
+      <text x="858" y="590" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">8 pairs</text>
+
+      <text x="10" y="682" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">A register written by the CONTROL plane changes what the DATA plane receives &#8212; that indirection through the AD9361 is the only</text>
+      <text x="10" y="695" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">coupling between them inside the radio. Inside the FPGA the two planes share no wire, no clock and no register.</text>
+    </svg>
+    <figcaption><b>The whole machine.</b> Read the top band left to right for a command, the bottom band for a sample. The tamers sit between because they are the one block <em>both</em> planes see &mdash; the CPU reads and arms them over Avalon, and their raw counters feed the reader and writer directly.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>The control plane, end to end</h2>
+  <p class="sub">what happens between your Python call and the LO moving</p>
+  <p>Every configuration change on this board is software writing registers one transaction at a time. There is no hardware sequencer &mdash; the FPGA contributes only the timestamp compare that says <em>when</em>, and the pins that carry the bits.</p>
+
+  <div class="scroller">
+    <p class="tbl-title">One retune, stage by stage</p>
+    <table>
+      <thead><tr><th>#</th><th>Stage</th><th>Signals</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td><code>libbladeRF</code> builds a 16-byte packet</td><td>magic <code>0x55</code> + timestamp + profile indices</td><td>&mdash;</td></tr>
+        <tr class="hot"><td class="num">2</td><td>USB control transfer to EP <code>0x02</code></td><td>bulk OUT</td><td class="num">&#8805; 250 &micro;s</td></tr>
+        <tr><td class="num">3</td><td>FX3 forwards to the UART</td><td>4 Mbaud serial</td><td class="num">40 &micro;s</td></tr>
+        <tr><td class="num">4</td><td><code>command_uart</code> filters the magic <em>in hardware</em>, raises IRQ 7</td><td>128-bit request register</td><td>1 clock</td></tr>
+        <tr><td class="num">5</td><td>NIOS reads the request &mdash; the read is what clears the IRQ</td><td>Avalon <code>address</code>, <code>read</code>, <code>readdata</code></td><td>~6 cy/instr</td></tr>
+        <tr class="hot"><td class="num">6</td><td>Handler writes AD9361 reg <code>0x25A</code> to recall the fastlock profile</td><td><code>rffe_spi</code> &#8594; <code>sclk</code>/<code>mosi</code>/<code>cs_n</code></td><td>3 SPI transactions</td></tr>
+        <tr><td class="num">7</td><td>Read-modify-write reg <code>0x004</code> for port select</td><td>same SPI bus</td><td>&mdash;</td></tr>
+        <tr><td class="num">8</td><td>Read-modify-write the RFFE PIO for the SPDT switches</td><td><code>gpio_rffe_0</code> &#8594; fabric pins</td><td>2 PIO writes</td></tr>
+        <tr class="hot"><td class="num">9</td><td>LO moves on the first SPI write; band switch trails</td><td>&mdash;</td><td class="num">~1.8 &micro;s</td></tr>
+        <tr><td class="num">10</td><td>Response packet back up the same path</td><td>128-bit response register</td><td class="num">&#8805; 250 &micro;s</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <p class="h">The retune is not the expensive part</p>
+    <p>Stage 9 &mdash; the actual frequency change &mdash; is <strong>1.8 &micro;s</strong>. Stages 2 and 10 are <strong>250 &micro;s each</strong>. Better than 99% of a retune's wall-clock cost is USB transport, not RF settling, which is why the scheduled-retune path exists at all: it moves the decision onto the FPGA so the transport cost is paid once, ahead of time, instead of once per step.</p>
+  </div>
+
+  <h3 class="axis">Two structural facts that bite</h3>
+  <p><strong>Deferred work is starved by packet traffic.</strong> The NIOS main loop only calls <code>do_work()</code> on iterations with no pending packet. RFIC <em>writes</em> are enqueued there, not executed inline &mdash; so a host that hammers the command UART back to back stops the retune queue advancing at all. This is why libbladeRF sleeps 100&nbsp;&micro;s between RFIC status polls: the sleep is what lets the NIOS reach its own queue.</p>
+  <p><strong>The CPU is never reset.</strong> <code>reset_reset_n</code> is tied high in the VHDL, so every bit of state &mdash; register shadows, retune queues, the fastlock profile table, the 256-profile counter &mdash; survives <code>bladerf_open</code>, <code>bladerf_close</code> and USB re-enumeration. Only reconfiguring the FPGA clears it.</p>
+</section>
+
+<section>
+  <h2>The data plane, end to end</h2>
+  <p class="sub">the same trip for a sample, and the four places it can be silently lost</p>
+  <p>The two directions are near mirror images and share exactly one resource: the 32-bit GPIF bus, which is bidirectional and therefore half-duplex. Everything else is duplicated.</p>
+
+  <div class="scroller" style="margin-bottom:20px">
+    <p class="tbl-title">Outbound and inbound, with the controlling signal at each hop</p>
+    <table>
+      <thead><tr><th>Outbound &#183; USB &#8594; antenna</th><th>Gated by</th><th>Inbound &#183; antenna &#8594; USB</th><th>Gated by</th></tr></thead>
+      <tbody>
+        <tr><td>EP <code>0x01</code> &#8594; FX3 DMA</td><td>host</td><td>FX3 DMA &#8594; EP <code>0x81</code></td><td>host</td></tr>
+        <tr class="hot"><td><code>fx3_gpif</code> &#8594; <code>tx_fifo</code></td><td><code>wrreq</code> &#183; watermark 6144</td><td><code>rx_fifo</code> &#8594; <code>fx3_gpif</code></td><td><code>rdreq</code> &#183; two watermarks</td></tr>
+        <tr class="hot"><td><code>tx_fifo</code> &#8594; <code>fifo_reader</code></td><td><code>rdreq</code> &#183; trigger-gated <code>rempty</code></td><td><code>fifo_writer</code> &#8594; <code>rx_fifo</code></td><td><code>wrreq</code> &#183; <code>data_v</code> + <code>samples_left</code></td></tr>
+        <tr><td><code>fifo_reader</code> &#8594; <code>axi_ad9361</code></td><td><code>data_v</code> &#183; timestamp gate</td><td><code>rx_mux</code> &#8594; <code>fifo_writer</code></td><td><code>data_v</code> from the ADC</td></tr>
+        <tr><td>LVDS &#8594; DAC</td><td>free-running</td><td>ADC &#8594; LVDS</td><td>free-running</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Note the asymmetry in where flow control sits. <strong>TX is guarded at the host end</strong> &mdash; <code>fx3_gpif</code> refuses to start a transfer above 6144 words, and <code>fifo_reader</code> has no watermark at all. <strong>RX is guarded at the radio end</strong> &mdash; <code>fifo_writer</code> carries the credit check itself. That follows from how each direction fails: TX fails by running dry, which only the side holding the host buffers can prevent; RX fails by overrunning, which no upstream can prevent because the ADC does not stop.</p>
+
+  <h3 class="axis">Four silent failures, collected</h3>
+  <div class="mods">
+    <div class="mod"><div class="mod-name">An idle TX keeps radiating</div><div class="mod-src">ch 06</div><div class="mod-job">On underrun <code>data_v</code> goes low, the DAC register's clock enable <em>is</em> <code>data_v</code>, and the FIFO output holds its last word &mdash; so the DAC parks on the last sample and emits an <b>unmodulated carrier at the LO</b>. Not silence. libbladeRF requires the last two samples of a burst be zero.</div></div>
+    <div class="mod"><div class="mod-name">Samples outside &plusmn;2047 wrap</div><div class="mod-src">ch 06</div><div class="mod-job"><code>unpack()</code> reads only bits 11:0 of each lane and re-derives sign from bit 11. Nothing clips, nothing warns.</div></div>
+    <div class="mod"><div class="mod-name">RX overflow has no status bit</div><div class="mod-src">ch 07</div><div class="mod-job">The overflow counter is mapped to <code>open</code> and synthesized away. The LED is the only fabric-level indication &mdash; and its one-shot reloads in an <code>elsif</code>, so it stays <b>dark for the duration of the event</b>. The host can only infer an overrun from a timestamp discontinuity, which requires metadata.</div></div>
+    <div class="mod"><div class="mod-name">A late TX buffer is discarded whole</div><div class="mod-src">ch 04</div><div class="mod-job">If the header timestamp has already passed at DMA time, <code>fx3_gpif</code> diverts to <code>SAMPLE_WRITE_IGNORE</code> and drops all 2048 words. The underrun flag it raises rides back in an <em>RX</em> header &mdash; so you need an RX stream running to see a TX fault.</div></div>
+  </div>
+
+  <div class="note">
+    <p class="h">What this adds up to for a stepped-frequency sweep</p>
+    <p>The control plane costs ~500&nbsp;&micro;s per retune, almost all of it USB, against 1.8&nbsp;&micro;s of actual RF settling. The data plane will not tell you when it has failed. Both point the same way: <strong>keep the streams running continuously and move the per-step decisions onto the FPGA</strong>, which is what the scheduled-retune path is for &mdash; and which needs the <code>SC16_Q11_META</code> format and the TX-side HDL patch that this build does not yet have.</p>
+  </div>
+</section>

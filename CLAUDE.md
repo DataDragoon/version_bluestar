@@ -313,15 +313,23 @@ load today. Gated on fixing the META format above.
 
 ## FPGA Guide — published reference doc (docs/fpga-guide/)
 
-A seven-chapter technical guide to the bladeRF hosted FPGA image, published as a Claude
+An eight-chapter technical guide to the bladeRF hosted FPGA image, published as a Claude
 Artifact and **rebuildable from this repo**:
 
   https://claude.ai/code/artifact/cd0df1ad-2556-428f-a75a-1b02b4236619
 
 Chapters: 01 module inventory · 02 sample round trip (USB→RF→USB) · 03 the NIOS
 (pins, functions, boot/shutdown) · 04 the TX FIFO · 05 the RX FIFO · 06 `fifo_reader`
-(the sample reader) · 07 `fifo_writer` (the sample packer). Single page, sticky chapter
-index, print styles for PDF export.
+(the sample reader) · 07 `fifo_writer` (the sample packer) · 08 the whole machine
+(overview architecture). Single page, sticky chapter index, print styles for PDF export.
+
+Ch 03 carries the **Avalon bus diagram** — all 19 data-master slaves with base addresses
+and IRQs, verified against `nios_system.tcl`. Ch 08 is the **overview architecture**: the
+board as two independent planes (control: command_uart → NIOS → Avalon → rffe_spi/gpio →
+AD9361 registers; data: GPIF → FIFOs → reader/writer → axi_ad9361 → converters) that meet
+only inside the FX3 and inside the AD9361. Nothing on the Avalon bus can reach a FIFO —
+the sample path is hand-instantiated outside Qsys and has no base address, which is why
+every sample-path fault is invisible to the firmware.
 
 Two findings from ch 06/07 that bear on sweep work: an idle TX **keeps radiating** — the
 DAC register's clock enable *is* `data_v`, so on underrun it parks on the last sample and
