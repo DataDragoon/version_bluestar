@@ -1,0 +1,177 @@
+<section>
+  <h2>What it is</h2>
+  <p class="sub">64-bit in, 32-bit out, 8192 words deep &mdash; the mirror of Chapter 4, with three real differences</p>
+  <p>Same wrapper, same megafunction, opposite direction: <strong>64 KiB</strong> of M10K, written by the sample packer in the AD9361 clock domain and drained 32 bits at a time by the GPIF interface. Twice the storage of the TX FIFO, because the same 8192-word depth now counts 64-bit words.</p>
+  <p>Three things genuinely differ from TX, and all three matter:</p>
+  <ul>
+    <li><strong>The occupancy counters have different widths</strong> &mdash; 13 bits on the write side, <strong>14 on the read side</strong>. Same physical buffer, counted in different units.</li>
+    <li><strong>The full flags are actually read.</strong> Both sides consult them, and both concatenate <code>full &amp; usedw</code> to work around the counters' inability to express &ldquo;completely full&rdquo;.</li>
+    <li><strong>The clear line is different.</strong> TX is cleared only by a global reset; RX is flushed every time the host disables RX.</li>
+  </ul>
+
+  <div class="scroller">
+    <table>
+      <thead><tr><th>Property</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td>Write width</td><td>64 bits &mdash; a packed MIMO pair</td></tr>
+        <tr><td>Read width</td><td>32 bits &mdash; one host sample</td></tr>
+        <tr class="hot"><td>Depth</td><td>8192 write-words = <b>64 KiB</b></td></tr>
+        <tr><td><code>wrusedw</code></td><td>13 bits, counting 64-bit words (max 8192)</td></tr>
+        <tr class="hot"><td><code>rdusedw</code></td><td><b>14 bits</b>, counting 32-bit words (max 16384)</td></tr>
+        <tr><td>Write clock</td><td><code>rx_clock</code> (= AD9361 <code>l_clk</code>)</td></tr>
+        <tr><td>Read clock</td><td><code>fx3_pclk_pll</code></td></tr>
+        <tr><td>Output register</td><td>none &mdash; <code>q</code> is combinational off the RAM</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>That last row has a visible consequence in the source: because the megafunction's outputs are unregistered, <code>fifo_writer</code> explicitly re-registers the flags before using them, with a comment saying exactly why. The occupancy it makes decisions on is therefore <strong>at least two cycles stale</strong>, on top of the five-stage pointer synchronizer &mdash; which is why the watermarks reserve a whole DMA buffer of margin.</p>
+</section>
+
+<section>
+  <h2>The wiring, end to end</h2>
+  <p class="sub">every port, and the module at the far end of it</p>
+
+  <figure>
+    <svg viewBox="0 0 960 400" role="img" aria-label="Signal-level diagram of the RX FIFO. On the left, fifo_writer in the AD9361 sample clock domain drives 64-bit data and wrreq and reads back wrfull and wrusedw. On the right, fx3_gpif in the FX3 PCLK domain drives rdreq and reads 32-bit q plus rdusedw and rdfull. The aclr input comes from the inverted rx_enable_pclk above.">
+      <defs>
+        <marker id="ra" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="rr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--rust)"/>
+        </marker>
+      </defs>
+
+      <text x="24" y="36" font-family="Archivo, sans-serif" font-size="11" font-weight="700" fill="var(--rust)">rx_clock DOMAIN</text>
+      <text x="766" y="36" font-family="Archivo, sans-serif" font-size="11" font-weight="700" fill="var(--slate)">fx3_pclk DOMAIN</text>
+
+      <rect x="24" y="118" width="170" height="150" fill="var(--rust)" opacity=".10"/>
+      <rect x="24" y="118" width="170" height="150" fill="none" stroke="var(--rust)" stroke-width="1.25"/>
+      <text x="109" y="180" font-family="JetBrains Mono, monospace" font-size="12" fill="currentColor" text-anchor="middle">fifo_writer</text>
+      <text x="109" y="200" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">WRITE_SAMPLES state</text>
+
+      <rect x="766" y="118" width="170" height="150" fill="var(--surface-2)" stroke="var(--slate)" stroke-width="1.25"/>
+      <text x="851" y="180" font-family="JetBrains Mono, monospace" font-size="12" fill="currentColor" text-anchor="middle">fx3_gpif</text>
+      <text x="851" y="200" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">SAMPLE_READ state</text>
+
+      <rect x="350" y="96" width="260" height="200" fill="var(--surface)" stroke="var(--indigo)" stroke-width="1.5"/>
+      <line x1="480" y1="90" x2="480" y2="302" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+      <text x="480" y="122" font-family="Archivo, sans-serif" font-size="13" font-weight="700" fill="var(--indigo)" text-anchor="middle">rx_fifo</text>
+      <text x="415" y="145" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle">write 64b</text>
+      <text x="545" y="145" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle">read 32b</text>
+      <text x="480" y="285" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle">8192 words &#183; 64 KiB</text>
+
+      <line x1="480" y1="52" x2="480" y2="92" stroke="var(--rust)" stroke-width="1.25" marker-end="url(#rr)"/>
+      <text x="490" y="48" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)">aclr &#8592; NOT rx_enable_pclk &#8592; fx3_ctl(4)</text>
+
+      <line x1="196" y1="166" x2="346" y2="166" stroke="currentColor" stroke-width="2.5" marker-end="url(#ra)"/>
+      <text x="271" y="158" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">data[63:0]</text>
+      <line x1="196" y1="200" x2="346" y2="200" stroke="currentColor" stroke-width="1.25" marker-end="url(#ra)"/>
+      <text x="271" y="192" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">wrreq</text>
+      <line x1="346" y1="238" x2="198" y2="238" stroke="var(--rust)" stroke-width="1.5" marker-end="url(#rr)"/>
+      <text x="271" y="230" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--rust)" text-anchor="middle">wrfull + wrusedw[12:0]</text>
+      <text x="271" y="256" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">both read &#8212; gate writes,</text>
+      <text x="271" y="268" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">HOLDOFF, and overflow LED</text>
+
+      <line x1="614" y1="166" x2="762" y2="166" stroke="currentColor" stroke-width="2.5" marker-end="url(#ra)"/>
+      <text x="688" y="158" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">q[31:0]</text>
+      <line x1="762" y1="200" x2="614" y2="200" stroke="currentColor" stroke-width="1.25" marker-end="url(#ra)"/>
+      <text x="688" y="192" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">rdreq</text>
+      <line x1="614" y1="238" x2="762" y2="238" stroke="var(--rust)" stroke-width="1.5" marker-end="url(#rr)"/>
+      <text x="688" y="230" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--rust)" text-anchor="middle">rdfull + rdusedw[13:0]</text>
+      <text x="688" y="256" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">drive BOTH waterlines</text>
+      <text x="688" y="268" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">rdempty: never read</text>
+
+      <line x1="24" y1="330" x2="936" y2="330" stroke="var(--rule)"/>
+      <text x="24" y="350" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">Both sides read their full flag here, unlike TX. Each concatenates full &amp; usedw before comparing, because neither counter can</text>
+      <text x="24" y="365" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">express a completely full FIFO &#8212; they wrap to zero. rdempty is declared in fx3_gpif and never referenced.</text>
+    </svg>
+    <figcaption><b>The mirror image, with real asymmetries.</b> RX reads its full flags on both sides; the read-side occupancy drives <em>two</em> separate watermarks, one of which reaches back into bus arbitration.</figcaption>
+  </figure>
+
+  <div class="wide">
+    <p class="tbl-title">rx_fifo &#183; complete port table</p>
+    <div class="scroller">
+      <table>
+        <thead><tr><th>Port</th><th>Dir</th><th>W</th><th>Driven by</th><th>Consumed by</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr class="hot"><td>aclr</td><td>in</td><td class="num">1</td><td><code>NOT rx_enable_pclk</code>, from <code>fx3_ctl(4)</code></td><td>the FIFO, both domains</td><td>Flushed whenever the host disables RX</td></tr>
+          <tr class="hot"><td>data</td><td>in</td><td class="num">64</td><td><b>fifo_writer</b> &mdash; the <code>pack()</code> function</td><td>FIFO write port</td><td>Q1 I1 Q0 I0, or two samples of one channel</td></tr>
+          <tr class="hot"><td>wrreq</td><td>in</td><td class="num">1</td><td><b>fifo_writer</b> &mdash; <code>WRITE_SAMPLES</code></td><td>FIFO write port</td><td>Commit one packed word</td></tr>
+          <tr><td>wrclk</td><td>in</td><td class="num">1</td><td><code>rx_clock</code> = <code>ad9361.clock</code></td><td>FIFO write domain</td><td>&mdash;</td></tr>
+          <tr class="hot"><td>wrfull</td><td>out</td><td class="num">1</td><td>the FIFO</td><td><b>fifo_writer</b> (3 uses) and the loopback controller</td><td>Blocks writes, forces HOLDOFF, triggers the overflow LED</td></tr>
+          <tr class="hot"><td>wrusedw</td><td>out</td><td class="num">13</td><td>the FIFO</td><td><b>fifo_writer</b> &mdash; the <code>fifo_enough</code> credit check</td><td>Fill level, 64-bit words</td></tr>
+          <tr><td>wrempty</td><td>out</td><td class="num">1</td><td>the FIFO</td><td><b>nobody</b></td><td>Write-domain empty</td></tr>
+          <tr class="hot"><td>q</td><td>out</td><td class="num">32</td><td>the FIFO</td><td><b>fx3_gpif</b> &mdash; driven onto the bus</td><td>Head word, valid before <code>rdreq</code></td></tr>
+          <tr class="hot"><td>rdreq</td><td>in</td><td class="num">1</td><td><b>fx3_gpif</b> &mdash; <code>SETUP_RD</code> and <code>SAMPLE_READ</code></td><td>FIFO read port</td><td>Pop-acknowledge</td></tr>
+          <tr><td>rdclk</td><td>in</td><td class="num">1</td><td><code>fx3_pclk_pll</code></td><td>FIFO read domain</td><td>&mdash;</td></tr>
+          <tr class="hot"><td>rdusedw</td><td>out</td><td class="num">14</td><td>the FIFO</td><td><b>fx3_gpif</b> &mdash; <em>both</em> waterlines</td><td>Fill level, 32-bit words</td></tr>
+          <tr class="hot"><td>rdfull</td><td>out</td><td class="num">1</td><td>the FIFO</td><td><b>fx3_gpif</b> &mdash; MSB extension of <code>rdusedw</code></td><td>Its only job is to disambiguate a full FIFO</td></tr>
+          <tr><td>rdempty</td><td>out</td><td class="num">1</td><td>the FIFO</td><td><b>nobody</b> &mdash; declared, never referenced</td><td>Read-domain empty</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>The two waterlines</h2>
+  <p class="sub">both derive from rdusedw, and they do different jobs</p>
+
+  <div class="stagerow"><span class="sn">1</span><h3>rx_fifo_enough &mdash; may a transfer start?</h3></div>
+  <p>Compares <code>rdfull &amp; rdusedw</code> &mdash; a 15-bit value &mdash; against the GPIF buffer size. It trips once <strong>2048 32-bit words (8 KiB, one whole DMA buffer)</strong> are readable on SuperSpeed, 1024 on High Speed.</p>
+  <p>It is one of four AND terms in <code>can_rx</code>. False means the state machine never leaves <code>IDLE</code> toward a read: no <code>rdreq</code>, no DMA acknowledge, nothing sent to the host. In packet mode this sample count is replaced entirely by &ldquo;a packet header exists&rdquo;.</p>
+
+  <div class="stagerow"><span class="sn">2</span><h3>rx_fifo_critical &mdash; is RX about to overflow?</h3></div>
+  <p>Compares bare <code>rdusedw</code> (no full flag) against half the read-side capacity minus one buffer &mdash; tripping at <strong>6144 words</strong> on SuperSpeed.</p>
+  <p>This is the signal that reaches back into <strong>bus arbitration</strong>, and it is the reason Chapter 2's half-duplex bus behaves the way it does. Normally TX is checked first, deliberately, to avoid discontinuities in the transmitted signal. But a critical RX is checked <em>before</em> both &mdash; so a nearly-full RX FIFO pre-empts a pending TX transfer. It is the anti-overflow escape hatch.</p>
+  <div class="note">
+    <p class="h">The comment and the arithmetic disagree</p>
+    <p>The source calls this &ldquo;can we not fit one more block of data in RX buffer?&rdquo;, but the expression measures against <em>half</em> the read-side depth. The read side holds 16384 words, so &ldquo;critical&rdquo; actually fires at <strong>37.5% full</strong>, not one block from full. The TX equivalent has no such halving. Conservative rather than wrong &mdash; but if you are reasoning about headroom, use the number, not the comment.</p>
+  </div>
+</section>
+
+<section>
+  <h2>The clear line, and a crossing that is waived rather than synchronized</h2>
+  <p class="sub">worth knowing if you ever chase an intermittent RX fault</p>
+  <p>Unlike TX, the RX FIFO is flushed on every RX disable. The chain is short:</p>
+<pre>FX3 asserts CTL[4]  (dma_rx_enable)
+  &#8594; sampled by a <b>single</b> flop in fx3_gpif &#8594; rx_enable_pclk
+  &#8594; inverted, straight into <b>aclr</b> &#8212; no synchronizer</pre>
+  <p><code>rx_enable_pclk</code> lives in the PCLK domain, which is the FIFO's <em>read</em> clock. Its assertion edge is therefore synchronous to the read side but <strong>fully asynchronous to the write side</strong>, where the sample clock runs. There is no RTL synchronizer on that path. De-assertion is handled inside the megafunction; the assertion edge is covered by explicit timing waivers instead:</p>
+<pre>set_false_path -from {fx3_gpif*rx_enable} -to {*rx_fifo*:wraclr|*}</pre>
+  <p>By contrast the <em>enable</em> that gates the writer is properly three-flop synchronized before use. So: the writer's enable crosses safely; the FIFO's async clear crosses by constraint waiver. Both are defensible, but they are not the same mechanism, and only one of them is visible in the RTL.</p>
+</section>
+
+<section>
+  <h2>The sibling FIFOs</h2>
+  <p class="sub">two more, sharing the same control structure</p>
+
+  <h3 class="axis">rx_meta_fifo &mdash; 128 in, 32 out, 2048 deep</h3>
+  <p>Carries the timestamp headers alongside the samples. Cleared by the same <code>NOT rx_enable_pclk</code> line, deliberately, <strong>so metadata and samples can never desynchronize</strong>. Its header is built as a 128-bit word and read out as four 32-bit slices; the last slice has its low 16 bits overwritten on the way out with the <em>TX</em> underrun flags.</p>
+  <p>Only one of its flags does any work: the read-side <code>rdempty</code>, which gates <code>rx_meta_ok</code> in the transfer-start decision. Its <code>rdfull</code> and read-side occupancy are declared in <code>fx3_gpif</code> and never referenced &mdash; and note the port is spelled <code>usedr</code>, not <code>usedw</code>, unlike every sibling.</p>
+  <div class="note">
+    <p class="h">A misleading comment</p>
+    <p>The depth constant is annotated &ldquo;<code>2048 -- 32-bit words</code>&rdquo;. It is not. <code>LPM_NUMWORDS</code> is a <em>write-side</em> count, so it is 2048 &times; 128-bit entries = <strong>8192</strong> 32-bit words. The firmware reads it correctly; the comment does not.</p>
+  </div>
+
+  <h3 class="axis">lb_fifo &mdash; 64 in, 64 out, 512 deep</h3>
+  <p>The digital loopback path, and the only one of the three that runs <strong>TX &rarr; RX</strong>: written in the TX domain from the words popped off the TX FIFO, read in the RX domain. Because both widths are equal it elaborates a plain <code>dcfifo</code> rather than the mixed-width variant.</p>
+  <p>Its write-full flag is the one piece of genuine back-pressure in the system: it reaches back into <code>tx.vhd</code> and stalls the TX reader for three cycles so loopback data is not dropped. Its read side is pulled only when the previous word is fully unpacked <em>and the RX sample FIFO has room</em>.</p>
+  <p>Curiously, both its clocks alias the same net on this board, so it is physically synchronous while being parameterized asynchronous &mdash; costing latency and gray-code logic to keep the wrapper uniform. It is also the only one of the three whose clear <em>is</em> properly resynchronized in RTL, which is just as well: it is the one the timing waivers do not cover.</p>
+</section>
+
+<section>
+  <h2>Where the data comes from</h2>
+  <p class="sub">one 64-bit word, tracked</p>
+  <p>Before it arrives:</p>
+<pre>AD9361 &#8594; LVDS pins &#8594; axi_ad9361 (deserialize)
+  &#8594; adc_assignment_proc (to generic sample streams)
+  &#8594; rx_mux (select ADC / counter / loopback, apply trigger)
+  &#8594; fifo_writer (pack into 64 bits) &#8594; <b>rx_fifo</b></pre>
+  <p>After it leaves, split into two 32-bit halves:</p>
+<pre><b>rx_fifo</b> &#8594; CDC to fx3_pclk &#8594; fx3_gpif.gpif_mux
+  &#8594; register_gpif (tristate) &#8594; fx3_gpif[31:0] pins
+  &#8594; FX3 GPIF II &#8594; USB 3.0 &#8594; libbladeRF &#8594; your driver</pre>
+  <p>If metadata is on, four header dwords are emitted <em>ahead</em> of the samples in the same transfer, and the last of them carries the TX underrun flag. That is the only channel by which a transmit-side problem reaches the host &mdash; which is why an RX stream has to be running to observe one.</p>
+</section>

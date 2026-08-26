@@ -1,0 +1,175 @@
+<section>
+  <h2>What it is</h2>
+  <p class="sub">32-bit in, 64-bit out, 8192 words deep</p>
+  <p>One M10K-backed dual-clock FIFO, <strong>32 KiB</strong> of storage, sitting between the FX3 bus and the AD9361 sample clock. Written 32 bits at a time by the GPIF interface, read 64 bits at a time by the sample reader.</p>
+  <p>The wrapper is a pure pass-through to Altera's <code>dcfifo_mixed_widths</code>; every generic is forwarded verbatim. Three of them shape everything downstream:</p>
+  <ul>
+    <li><strong><code>LPM_SHOWAHEAD = "ON"</code></strong> &mdash; the head word is already present on <code>q</code>. <code>rdreq</code> is an <em>acknowledge</em>, not a request. This is why the reader never waits a cycle for data.</li>
+    <li><strong><code>ADD_USEDW_MSB_BIT = "OFF"</code></strong> &mdash; neither occupancy counter can express &ldquo;completely full&rdquo;; both wrap to zero. That is why the separate full flags exist, and why the RX side concatenates <code>full &amp; usedw</code> before comparing.</li>
+    <li><strong><code>OVERFLOW_CHECKING / UNDERFLOW_CHECKING = "ON"</code></strong> &mdash; the megafunction internally masks <code>wrreq</code> when full and <code>rdreq</code> when empty. This is the <em>only</em> cycle-level protection the TX write side has.</li>
+  </ul>
+  <p>The depth is not set where you would expect. The wrapper defaults to 4096 and is overridden at instantiation to <code>2**(sample_fifo.wused'length)</code> &mdash; the width of the record field, which is itself derived from <code>TX_FIFO_LENGTH = 8192</code>. So <strong>the single knob is <code>TX_FIFO_LENGTH</code></strong>; editing the wrapper default alone does nothing.</p>
+
+  <div class="scroller">
+    <table>
+      <thead><tr><th>Property</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td>Write width</td><td>32 bits &mdash; one host SC16Q11 sample</td></tr>
+        <tr><td>Read width</td><td>64 bits &mdash; two samples, or one MIMO pair</td></tr>
+        <tr class="hot"><td>Depth</td><td>8192 write-words = 32 KiB</td></tr>
+        <tr><td><code>wrusedw</code></td><td>13 bits, counting 32-bit words</td></tr>
+        <tr><td><code>rdusedw</code></td><td>12 bits, counting 64-bit words</td></tr>
+        <tr><td>Write clock</td><td><code>fx3_pclk_pll</code></td></tr>
+        <tr><td>Read clock</td><td><code>tx_clock</code> (= AD9361 <code>l_clk</code>)</td></tr>
+        <tr><td>Pointer sync depth</td><td>5 stages each direction</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>The wiring, end to end</h2>
+  <p class="sub">every port, and the module at the far end of it</p>
+
+  <figure>
+    <svg viewBox="0 0 960 400" role="img" aria-label="Signal-level diagram of the TX FIFO. On the left, fx3_gpif in the FX3 PCLK domain drives 32-bit data and wrreq into the FIFO and reads back wrusedw. On the right, fifo_reader in the AD9361 sample clock domain drives rdreq and reads 64-bit q and the empty flag through the trigger block. The aclr input comes from tx_reset above.">
+      <defs>
+        <marker id="ta" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="tr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--rust)"/>
+        </marker>
+      </defs>
+
+      <text x="24" y="36" font-family="Archivo, sans-serif" font-size="11" font-weight="700" fill="var(--slate)">fx3_pclk DOMAIN</text>
+      <text x="766" y="36" font-family="Archivo, sans-serif" font-size="11" font-weight="700" fill="var(--rust)">tx_clock DOMAIN</text>
+
+      <rect x="24" y="118" width="170" height="150" fill="var(--surface-2)" stroke="var(--slate)" stroke-width="1.25"/>
+      <text x="109" y="180" font-family="JetBrains Mono, monospace" font-size="12" fill="currentColor" text-anchor="middle">fx3_gpif</text>
+      <text x="109" y="200" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">SAMPLE_WRITE state</text>
+
+      <rect x="766" y="118" width="170" height="150" fill="var(--rust)" opacity=".10"/>
+      <rect x="766" y="118" width="170" height="150" fill="none" stroke="var(--rust)" stroke-width="1.25"/>
+      <text x="851" y="180" font-family="JetBrains Mono, monospace" font-size="12" fill="currentColor" text-anchor="middle">fifo_reader</text>
+      <text x="851" y="200" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">READ_SAMPLES state</text>
+
+      <rect x="350" y="96" width="260" height="200" fill="var(--surface)" stroke="var(--indigo)" stroke-width="1.5"/>
+      <line x1="480" y1="90" x2="480" y2="302" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+      <text x="480" y="122" font-family="Archivo, sans-serif" font-size="13" font-weight="700" fill="var(--indigo)" text-anchor="middle">tx_fifo</text>
+      <text x="415" y="145" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle">write 32b</text>
+      <text x="545" y="145" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle">read 64b</text>
+      <text x="480" y="285" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle">8192 words &#183; 32 KiB</text>
+
+      <line x1="480" y1="52" x2="480" y2="92" stroke="var(--rust)" stroke-width="1.25" marker-end="url(#tr)"/>
+      <text x="490" y="48" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)">aclr &#8592; tx_reset &#8592; fx3_ctl(7)</text>
+
+      <line x1="196" y1="166" x2="346" y2="166" stroke="currentColor" stroke-width="2.5" marker-end="url(#ta)"/>
+      <text x="271" y="158" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">data[31:0]</text>
+      <line x1="196" y1="200" x2="346" y2="200" stroke="currentColor" stroke-width="1.25" marker-end="url(#ta)"/>
+      <text x="271" y="192" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">wrreq</text>
+      <line x1="346" y1="238" x2="198" y2="238" stroke="currentColor" stroke-width="1.25" marker-end="url(#ta)"/>
+      <text x="271" y="230" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">wrusedw[12:0]</text>
+      <text x="271" y="256" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">wrfull, wrempty</text>
+      <text x="271" y="268" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">routed but NEVER READ</text>
+
+      <line x1="614" y1="166" x2="762" y2="166" stroke="currentColor" stroke-width="2.5" marker-end="url(#ta)"/>
+      <text x="688" y="158" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">q[63:0]</text>
+      <line x1="762" y1="200" x2="614" y2="200" stroke="currentColor" stroke-width="1.25" marker-end="url(#ta)"/>
+      <text x="688" y="192" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor" text-anchor="middle">rdreq</text>
+      <line x1="614" y1="238" x2="762" y2="238" stroke="var(--rust)" stroke-width="1.25" marker-end="url(#tr)"/>
+      <text x="688" y="230" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--rust)" text-anchor="middle">rdempty &#8594; via trigger</text>
+      <text x="688" y="256" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">rdfull, rdusedw</text>
+      <text x="688" y="268" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">dangling</text>
+
+      <line x1="24" y1="330" x2="936" y2="330" stroke="var(--rule)"/>
+      <text x="24" y="350" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">Thick = data. Thin = control. The only flow-control signal the write side reads is wrusedw; full and empty are wired across two</text>
+      <text x="24" y="365" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">entity boundaries and discarded. On the read side, rdempty does not reach fifo_reader directly &#8212; it passes through the trigger block.</text>
+    </svg>
+    <figcaption><b>Where every control signal enters and leaves.</b> Data crosses left to right; the only feedback the writer gets is an occupancy count, and the only flag the reader consults is a <em>trigger-gated</em> empty.</figcaption>
+  </figure>
+
+  <div class="wide">
+    <p class="tbl-title">tx_fifo &#183; complete port table</p>
+    <div class="scroller">
+      <table>
+        <thead><tr><th>Port</th><th>Dir</th><th>W</th><th>Driven by</th><th>Consumed by</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td>aclr</td><td>in</td><td class="num">1</td><td><code>tx_reset</code>, from <code>fx3_ctl(7)</code> via a reset synchronizer</td><td>the FIFO, both domains</td><td>Async clear of both pointer sets</td></tr>
+          <tr class="hot"><td>data</td><td>in</td><td class="num">32</td><td><b>fx3_gpif</b> &mdash; <code>gpif_mux</code> process</td><td>FIFO write port</td><td>One host IQ word, SC16Q11</td></tr>
+          <tr class="hot"><td>wrreq</td><td>in</td><td class="num">1</td><td><b>fx3_gpif</b> &mdash; asserted only in <code>SAMPLE_WRITE</code></td><td>FIFO write port</td><td>Push one 32-bit word</td></tr>
+          <tr><td>wrclk</td><td>in</td><td class="num">1</td><td><code>fx3_pclk_pll</code> &mdash; PLL-retimed FX3 PCLK pin</td><td>FIFO write domain</td><td>&mdash;</td></tr>
+          <tr class="hot"><td>wrusedw</td><td>out</td><td class="num">13</td><td>the FIFO</td><td><b>fx3_gpif</b> &mdash; the <code>tx_fifo_enough</code> watermark</td><td>Fill level, 32-bit words</td></tr>
+          <tr><td>wrfull</td><td>out</td><td class="num">1</td><td>the FIFO</td><td><b>nobody</b></td><td>Write-domain full</td></tr>
+          <tr><td>wrempty</td><td>out</td><td class="num">1</td><td>the FIFO</td><td><b>nobody</b></td><td>Write-domain empty</td></tr>
+          <tr class="hot"><td>q</td><td>out</td><td class="num">64</td><td>the FIFO</td><td><b>fifo_reader</b>, and the loopback FIFO tap</td><td>Two packed samples</td></tr>
+          <tr class="hot"><td>rdreq</td><td>in</td><td class="num">1</td><td><b>fifo_reader</b> &mdash; <code>READ_SAMPLES</code></td><td>FIFO read port</td><td>Pop-acknowledge</td></tr>
+          <tr><td>rdclk</td><td>in</td><td class="num">1</td><td><code>tx_clock</code> = <code>ad9361.clock</code></td><td>FIFO read domain</td><td>&mdash;</td></tr>
+          <tr class="hot"><td>rdempty</td><td>out</td><td class="num">1</td><td>the FIFO</td><td><b>the trigger block</b>, then <b>fifo_reader</b></td><td>Empty &mdash; but gated, see below</td></tr>
+          <tr><td>rdfull</td><td>out</td><td class="num">1</td><td>the FIFO</td><td><b>nobody</b></td><td>Read-domain full</td></tr>
+          <tr><td>rdusedw</td><td>out</td><td class="num">12</td><td>the FIFO</td><td>wired to <code>fifo_reader</code>, <b>value never read</b></td><td>Fill level, 64-bit words</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>What has to be true for a write</h2>
+  <p class="sub">wrreq is asserted in exactly one state</p>
+  <p><code>wrreq</code> defaults low every cycle and is set in <strong>one place only</strong> &mdash; the <code>SAMPLE_WRITE</code> state of the GPIF state machine. Getting there requires, in order:</p>
+  <ul>
+    <li>The FX3 asserts its TX-enable line and raises a DMA request on one of the TX request pins.</li>
+    <li><strong>The watermark passes</strong>: fewer than <strong>6144 of 8192</strong> words occupied, <em>and</em> the metadata FIFO below half full. Either term failing blocks the transfer before it starts.</li>
+    <li>Arbitration in <code>IDLE</code> picks TX &mdash; which it normally does, since TX is checked before a non-critical RX to avoid discontinuities in the transmitted signal.</li>
+    <li>If metadata is on, the header's timestamp survives a check: zero (send now) or more than 32 ticks in the future. <strong>A late buffer is discarded entirely</strong> &mdash; the FSM diverts to <code>SAMPLE_WRITE_IGNORE</code>, raises the underrun flag, and <code>wrreq</code> is never asserted for those 2048 words.</li>
+  </ul>
+  <p>Note what is <em>not</em> in that list: the full flag. Once a burst starts, <code>wrreq</code> is unconditional for its whole length. The 2048-word headroom the watermark guarantees is the entire safety margin, backed only by the megafunction's internal masking.</p>
+
+  <h3 class="axis">And for a read</h3>
+  <p><code>rdreq</code> needs all of these simultaneously: the trigger-gated empty is low; the metadata FSM has reached the scheduled launch timestamp; loopback back-pressure is clear; at least one enabled DAC channel is asking for a sample; and the MIMO unpacker has exhausted the current 64-bit word. With two channels enabled that last condition is met on every request; with one channel, every other request.</p>
+</section>
+
+<section>
+  <h2>The trigger is wired into the empty flag</h2>
+  <p class="sub">the least obvious thing in this chapter</p>
+  <p>The FIFO's <code>rdempty</code> output does not go to the reader. It goes to a signal named <code>sample_fifo_rempty_untriggered</code>, passes through the multi-board trigger block, and only its <em>output</em> reaches <code>fifo_reader</code>:</p>
+<pre>txtrig : entity work.trigger(async)
+    generic map ( DEFAULT_OUTPUT =&gt; '1' )
+    port map (
+        signal_in  =&gt; <b>sample_fifo_rempty_untriggered</b>,
+        signal_out =&gt; <b>sample_fifo.rempty</b>
+    );</pre>
+  <p>Inside, it is three lines of combinational logic. While the trigger is armed and has not fired, <code>rempty</code> is forced high &mdash; <strong>the reader believes the FIFO is permanently dry while data keeps accumulating behind it.</strong> That is how a triggered transmit holds without touching the FIFO's real state.</p>
+  <div class="note">
+    <p class="h">Two consequences</p>
+    <p>An armed-but-unfired TX <strong>lights the underflow LED continuously</strong>, because the underflow detector also watches this gated flag. And the <em>metadata</em> FIFO's empty flag is <strong>not</strong> gated this way &mdash; it goes straight through. If you assume the two FIFOs behave symmetrically here, you will be wrong.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Wired but never read</h2>
+  <p class="sub">signals that cost routing and do nothing</p>
+  <div class="mods">
+    <div class="mod"><div class="mod-name">wrfull, wrempty</div><div class="mod-src">dead</div><div class="mod-job">Both are routed from the FIFO, through <code>tx.vhd</code>, across the entity boundary into <code>fx3_gpif</code> &mdash; where each appears <b>exactly once</b>, in its own port declaration. Four signals crossing two boundaries to be discarded. The RX side <em>does</em> read its full flag, so this is a TX-only oversight, not a convention.</div></div>
+    <div class="mod"><div class="mod-name">rdfull</div><div class="mod-src">dead</div><div class="mod-job">Connected to a record field that appears once in the whole file &mdash; the port map line itself. Driven, never read, never leaves the module.</div></div>
+    <div class="mod"><div class="mod-name">rdusedw</div><div class="mod-src">dead</div><div class="mod-job">Wired into <code>fifo_reader</code>, but the body never references the value. Only its <code>'length</code> is used &mdash; to size the very port that goes unread. <b>fifo_reader is driven purely by the empty flag.</b></div></div>
+    <div class="mod"><div class="mod-name">underflow_count</div><div class="mod-src">open</div><div class="mod-job">Explicitly left <code>open</code>. A 64-bit counter is synthesized and observed by nothing; only the LED one-shot escapes.</div></div>
+    <div class="mod"><div class="mod-name">READ_THROTTLE state</div><div class="mod-src">dead</div><div class="mod-job">The throttle generic is 0, which makes the guard statically false &mdash; an entire FSM branch is unreachable in this instance.</div></div>
+    <div class="mod"><div class="mod-name">Half of every record</div><div class="mod-src">note</div><div class="mod-job">The <code>tx_fifo_t</code> record describes one FIFO's whole interface, but the design splits that FIFO across two files. Each file leaves the other's half at its default, so roughly half of every declared record instance is constant-folded away. Nothing breaks; it just means the record is a naming convention, not a bundle.</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Where the data comes from</h2>
+  <p class="sub">one 32-bit word, tracked</p>
+  <p>Before it arrives:</p>
+<pre>host app &#8594; libbladeRF &#8594; USB 3.0 bulk OUT &#8594; FX3 GPIF II
+  &#8594; fx3_gpif[31:0] pins &#8594; register_gpif (1 pclk reg)
+  &#8594; fx3_gpif.gpif_mux (1 more pclk reg) &#8594; <b>tx_fifo</b></pre>
+  <p>After it leaves:</p>
+<pre><b>tx_fifo</b> &#8594; CDC to tx_clock &#8594; fifo_reader (unpack + timestamp gate)
+  &#8594; dac_assignment_proc (truncate to 12 bits, left-justified)
+  &#8594; axi_ad9361 &#8594; LVDS &#8594; AD9361 DAC &#8594; TX1 / TX2</pre>
+  <p>The metadata rides a parallel track for part of that journey only. It enters <code>fx3_gpif</code>, is shifted into a 128-bit buffer, dribbles into the meta FIFO <em>during</em> the sample writes rather than before them, and is consumed by the reader's metadata FSM &mdash; where it never becomes samples. It only decides <strong>when</strong> the sample FSM is allowed to pop.</p>
+</section>

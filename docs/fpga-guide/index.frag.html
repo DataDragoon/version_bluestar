@@ -1,0 +1,73 @@
+<div class="wrap">
+
+<header class="mast">
+  <p class="chapno">A working guide &#183; bladeRF 2.0 micro</p>
+  <h1>Inside the bladeRF FPGA</h1>
+  <p class="chaptitle">Contents</p>
+  <p class="dek">What is actually in the hosted bitstream, and what a sample does on its way through it. Every claim in these chapters is read out of the RTL, the build manifests and the FX3 firmware &mdash; not from documentation, and not from memory.</p>
+  <div class="tally">
+    <div><b>2</b><span>chapters</span></div>
+    <div><b>35174c30</b><span>source revision</span></div>
+    <div><b>0.16.0</b><span>NIOS FPGA</span></div>
+    <div><b>0</b><span>measured on hardware</span></div>
+  </div>
+</header>
+
+<section>
+  <h2>Chapters</h2>
+  <p class="sub">each opens as its own page</p>
+
+  <a class="chcard" href="__CH1URL__">
+    <span class="chnum">01</span>
+    <span class="chbody">
+      <span class="chtitle">The Module Inventory</span>
+      <span class="chsub">Every block in the hosted image</span>
+      <span class="chdek">What is compiled into the bitstream, where each block came from, and the one thing it does &mdash; grouped by clock domain, because that is the real structure of the design. Includes the four modules that are in the source tree but <em>not</em> in your FPGA.</span>
+      <span class="chstats">3 clock domains &#183; 4 IP vendors &#183; 22 Qsys instances &#183; 5 dual-clock FIFOs</span>
+    </span>
+  </a>
+
+  <a class="chcard" href="__CH2URL__">
+    <span class="chnum">02</span>
+    <span class="chbody">
+      <span class="chtitle">The Round Trip</span>
+      <span class="chsub">USB to RF and back, stage by stage</span>
+      <span class="chdek">One sample, all the way out and all the way back: across three clock domains, out of the antenna, and home again. Every module it touches, every wire it rides, and the cycle counts wherever the RTL commits to one.</span>
+      <span class="chstats">7 stages each way &#183; 2048 words per transaction &#183; 1022 FIFO ops &#183; 3 domain crossings</span>
+    </span>
+  </a>
+</section>
+
+<section>
+  <h2>The findings worth knowing</h2>
+  <p class="sub">the things that were not obvious before reading the source</p>
+
+  <div class="mods">
+    <div class="mod"><div class="mod-name">No retune logic in fabric</div><div class="mod-src">ch 01</div><div class="mod-job">There is <b>no hardware SPI sequencer and no fabric-level tuning trigger</b>. Every frequency change is NIOS firmware writing AD9361 registers one transaction at a time. The FPGA contributes only the timestamp compare that says <em>when</em>.</div></div>
+    <div class="mod"><div class="mod-name">rfic_spi_controller absent</div><div class="mod-src">ch 01</div><div class="mod-job">It exists in the tree and looks like the AD9361 SPI master, but <b>no Qsys system instantiates it</b> &mdash; it ships only in the WLAN image. The hosted build uses Altera's generic SPI core instead.</div></div>
+    <div class="mod"><div class="mod-name">ps_sync is power supply</div><div class="mod-src">ch 01</div><div class="mod-job">Not phase-shift. It hops the switching regulators through an LFSR frequency list to spread their emissions away from the RF band &mdash; directly relevant to the noise floor.</div></div>
+    <div class="mod"><div class="mod-name">The GPIF bus is half-duplex</div><div class="mod-src">ch 02</div><div class="mod-job"><code>fx3_gpif[31:0]</code> is one bidirectional bus shared by both directions. Every turnaround costs a dead gap, and arbitration <b>favours TX</b> unless the RX FIFO passes a critical watermark.</div></div>
+    <div class="mod"><div class="mod-name">Idle does not mean zero</div><div class="mod-src">ch 02</div><div class="mod-job">When the TX FIFO runs dry the DAC register <b>holds its last value</b> rather than flushing. That is why libbladeRF zero-pads every burst tail in software.</div></div>
+    <div class="mod"><div class="mod-name">FPGA ignores the metadata flags</div><div class="mod-src">ch 02</div><div class="mod-job"><code>BURST_START</code>, <code>BURST_END</code> and <code>TX_NOW</code> are never read by any RTL. <code>TX_NOW</code> is smuggled through the <em>timestamp</em> field: the host writes zero, the reader subtracts one, it wraps to all-ones.</div></div>
+    <div class="mod"><div class="mod-name">No RX overrun status bit</div><div class="mod-src">ch 02</div><div class="mod-job">The FPGA blinks an LED and nothing else &mdash; the counter output is left unconnected and synthesized away. The host infers overrun <b>only</b> from a discontinuity in the header timestamps, so without the metadata format there is no overrun detection at all.</div></div>
+    <div class="mod"><div class="mod-name">The trigger forges FIFO empty</div><div class="mod-src">ch 02</div><div class="mod-job">It does not gate samples. Armed-but-unfired makes the reader believe the FIFO is permanently dry &mdash; which also lights the underflow LED continuously.</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>How this was made</h2>
+  <div class="note">
+    <p class="h">Method, and its limits</p>
+    <p>Everything is traced from the bladeRF source at revision <code>35174c30</code>: the VHDL and Verilog, the Qsys build script, the FX3 firmware, and the <code>.qip</code> build manifests, which are authoritative for what is actually compiled in. Cycle counts are read out of the state machines. Clock rates are derived from the timing constraints and the deserializer geometry.</p>
+    <p><strong>Nothing here is measured on hardware.</strong> Where the source could not settle a question &mdash; the true GPIF clock, the AD9361 clock-tree ratios, anything living in the unfetched <code>no-OS</code> submodule &mdash; the chapters say so explicitly rather than guessing.</p>
+  </div>
+</section>
+
+<footer class="foot">
+  <p>
+    <b>Inside the bladeRF FPGA</b> &#183; a working guide to the hosted image on the bladeRF 2.0 micro.<br>
+    Chapters open as separate pages and can be shared independently.
+  </p>
+</footer>
+
+</div>

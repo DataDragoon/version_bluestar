@@ -1,0 +1,258 @@
+<section>
+  <h2>What it actually is</h2>
+  <p class="sub">altera_nios2_gen2 &#183; impl = Tiny &#183; 80 MHz</p>
+  <p>A <strong>Nios II/e</strong> soft CPU &mdash; the free, licence-unencumbered variant. The build script defaults to it because Nios II/f needs Quartus Standard or Pro, and that default has a consequence most people miss: <strong>a lot of the CPU configuration in the build script is inert.</strong> The 2&nbsp;KB instruction and data caches, the hardware multiplier, the barrel shifter, the SRT divider and the dynamic branch predictor are all specified in <code>nios_system.tcl</code> &mdash; and <strong>a Nios II/e has none of them.</strong></p>
+  <p>So: no cache, every instruction fetched over the Avalon fabric from on-chip RAM, roughly <strong>6 cycles per instruction</strong>, and every <code>*</code> or <code>/</code> compiled into a libgcc call. That is why the entire firmware is built <code>-Os</code> &mdash; smaller code is genuinely faster here, not just smaller.</p>
+  <p>It has one job: <strong>execute host command packets</strong>. It never touches a sample.</p>
+
+  <div class="scroller" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>Property</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td>Core</td><td>Nios II/e ("Tiny"), 32-bit, little-endian</td></tr>
+        <tr><td>Clock</td><td>80 MHz (<code>sys_clock</code>)</td></tr>
+        <tr class="hot"><td>RAM</td><td>131072 B on A4/A5/A9 &#183; 32768 B on A2</td></tr>
+        <tr class="hot"><td>RAM base</td><td><code>0x0002_0000</code> &mdash; base is set <em>equal to</em> the size</td></tr>
+        <tr><td>Reset vector</td><td><code>0x0002_0000</code></td></tr>
+        <tr><td>Exception vector</td><td><code>0x0002_0020</code></td></tr>
+        <tr><td>Caches</td><td>none (II/e)</td></tr>
+        <tr><td>MMU / MPU</td><td>none</td></tr>
+        <tr><td>Shadow register sets</td><td>0 &mdash; interrupts are not preemptive</td></tr>
+        <tr><td>Interrupt controller</td><td>internal (legacy IIC), 11 lines used</td></tr>
+        <tr><td>Watchdog / timer</td><td><strong>none at all</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <p class="h">Why your board matters</p>
+    <p>The RAM size gates a <code>#if RAM_SPAN &gt;= 131072</code> that defines <code>BLADERF_NIOS_LIBAD936X</code>. Your <strong>A9 sits exactly at the threshold</strong>, so the full Analog Devices AD9361 driver is compiled into the NIOS and the RFIC command path is live. On an A2 it is not, and the host silently falls back to driving the RFIC itself over raw SPI.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Life and death</h2>
+  <p class="sub">how it starts, and the fact that it essentially never stops</p>
+
+  <h3 class="axis">Where the program lives</h3>
+  <p>There is <strong>no bootloader and no firmware download</strong>. The compiled ELF is converted by <code>elf2hex</code> into a memory-initialisation file, referenced through <code>meminit.qip</code>, and Quartus bakes it into the on-chip RAM's power-up contents. The NIOS program is <em>part of the bitstream</em>.</p>
+  <p>The practical consequence: <strong>changing one line of NIOS C requires a full Quartus recompile.</strong> There is no faster path, short of a JTAG download.</p>
+
+  <h3 class="axis">Nothing ever resets it</h3>
+  <p>This is the single most surprising thing in the chapter. The Qsys system's reset input is tied high in the VHDL:</p>
+<pre>U_nios_system : component nios_system
+    port map (
+        clk_clk       =&gt; sys_clock,
+        <b>reset_reset_n =&gt; '1',</b>          <i>-- never asserted, ever</i></pre>
+  <p>That port is the reset sink feeding <em>every</em> slave in the system, the CPU and RAM included. So after FPGA configuration <strong>the NIOS is never reset again</strong>. All of its state &mdash; RFIC register shadows, retune queues, fastlock profile tables, the trim-DAC cache &mdash; survives host connect, disconnect, <code>bladerf_open</code>, <code>bladerf_close</code> and USB re-enumeration.</p>
+  <p>The FX3's <code>sys_reset_async</code> line does not reach it either. That signal has exactly two uses in the whole top level: it forces the command UART's RX line to idle and tri-states its TX. <strong>The NIOS keeps running at full speed and keeps all its state &mdash; it simply stops hearing the host.</strong></p>
+  <p>And the PLL reset only gates the clock. If the PLL loses lock the NIOS clock <em>stops</em>; when it relocks the CPU resumes mid-instruction-stream, with no reset.</p>
+
+  <h3 class="axis">The loop has no exit</h3>
+<pre><i>/* on real hardware, this is not a variable */</i>
+#define run_nios true
+
+while (run_nios) { ... }</pre>
+  <p>On the target <code>run_nios</code> is a macro expanding to <code>true</code> &mdash; the symbol only exists in the PC-simulation builds. The loop body contains exactly one control-transfer statement, a <code>continue</code> for an unrecognised magic byte. There is <strong>no <code>break</code>, no <code>return</code>, no <code>exit()</code>, no <code>abort()</code></strong> anywhere in the NIOS sources, and the BSP is built with <code>hal.enable_exit 0</code>. The <code>return 0;</code> at the end of <code>main()</code> is unreachable.</p>
+
+  <div class="scroller" style="margin-bottom:20px">
+    <p class="tbl-title">What actually restarts the NIOS</p>
+    <table>
+      <thead><tr><th>Action</th><th>FPGA reconfigured?</th><th>NIOS restarts?</th></tr></thead>
+      <tbody>
+        <tr class="hot"><td>bladerf_load_fpga()</td><td>Yes &mdash; nCONFIG pulse</td><td><strong>Yes, cleanly</strong></td></tr>
+        <tr class="hot"><td>bladerf_device_reset()</td><td>Yes, indirectly</td><td>Yes &mdash; see below</td></tr>
+        <tr><td>bladerf_open() / close()</td><td>No</td><td>No</td></tr>
+        <tr><td>bladerf_enable_module()</td><td>No</td><td>No &mdash; pulses CTL7 only</td></tr>
+        <tr><td>Any NIOS packet</td><td>No</td><td>No</td></tr>
+        <tr><td>USB unplug / replug</td><td>No</td><td>No</td></tr>
+        <tr><td>JTAG download</td><td>No</td><td>Yes</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><code>bladerf_device_reset()</code> is worth spelling out because the mechanism is indirect. It sends a vendor request that makes the <strong>FX3 reboot</strong>. On reboot the FX3 runs its <em>cold</em> GPIO init, which drives <code>nCONFIG</code> low &mdash; de-configuring the Cyclone V and killing the NIOS &mdash; and then reloads the bitstream from flash if a valid autoload image is present. So it does restart the NIOS, through a path that never involves the NIOS at all.</p>
+
+  <div class="note">
+    <p class="h">No watchdog, and places it can hang</p>
+    <p>There is no timer and no watchdog instantiated anywhere in the system, no exception handler registered, and <code>ASSERT</code> compiles to nothing. The I&sup2;C completion routine contains <strong>three unbounded spin loops with no timeout</strong> &mdash; a stuck bus wedges the CPU permanently. The SPI arbiter lock is a fourth. A hung NIOS produces a 250&nbsp;ms timeout per host access and <code>BLADERF_ERR_TIMEOUT</code>; libbladeRF has <strong>no retry and no recovery</strong>. Only reconfiguring the FPGA, a power cycle, or JTAG gets it back.</p>
+  </div>
+</section>
+
+<section>
+  <h2>The pins</h2>
+  <p class="sub">two levels that are easy to conflate</p>
+  <p>&ldquo;The NIOS's pins&rdquo; means two different things, and both matter.</p>
+
+  <h3 class="axis">Level A &mdash; the CPU's own interfaces</h3>
+  <p>Inside the Qsys system the CPU exposes: <code>clk</code>, <code>reset</code>, <code>instruction_master</code>, <code>data_master</code>, <code>irq</code>, and <code>debug_mem_slave</code>. That is all. There is no MMU or MPU interface, no tightly-coupled memory ports, no external interrupt controller port, and the <code>custom_instruction_master</code> is unconnected &mdash; there are no custom instructions.</p>
+  <p>The <strong>instruction master reaches only two slaves</strong>: the debug module and RAM. Code executes exclusively from on-chip RAM. The <strong>data master reaches 19</strong>:</p>
+
+  <div class="scroller" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>Base</th><th>Slave</th><th>IRQ</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td>0x8800</td><td>nios2.debug_mem_slave</td><td>&mdash;</td><td>JTAG debug module</td></tr>
+        <tr><td>0x9040</td><td>control</td><td>&mdash;</td><td>32-bit PIO &mdash; LEDs, clock select, XB mode</td></tr>
+        <tr><td>0x9060</td><td>peripheral_spi</td><td>4</td><td>trim DAC + ADF4002, 2 slave selects</td></tr>
+        <tr><td>0x90a0</td><td>xb_gpio_dir</td><td>&mdash;</td><td>expansion GPIO direction</td></tr>
+        <tr><td>0x90b0</td><td>xb_gpio</td><td>&mdash;</td><td>expansion GPIO data</td></tr>
+        <tr><td>0x90f0</td><td>opencores_i2c</td><td>5</td><td>I&sup2;C master, 400 kHz</td></tr>
+        <tr><td>0x9100</td><td>jtag_uart</td><td>1</td><td>debug console</td></tr>
+        <tr class="hot"><td>0x9120</td><td>command_uart</td><td><strong>7</strong></td><td>host packets arrive here</td></tr>
+        <tr><td>0x9140</td><td>tx_tamer</td><td>2</td><td>TX timestamp + compare</td></tr>
+        <tr><td>0x9160</td><td>rx_tamer</td><td>3</td><td>RX timestamp + compare</td></tr>
+        <tr class="hot"><td>0x9200</td><td>rffe_spi</td><td>8</td><td>AD9361 register bus, 40 MHz</td></tr>
+        <tr><td>0x9300</td><td>vctcxo_tamer_0</td><td>&mdash;</td><td>256 B scratch RAM &mdash; <em>not</em> the tamer IP</td></tr>
+        <tr><td>0x9400</td><td>rx_trigger_ctl</td><td>&mdash;</td><td>8-bit PIO</td></tr>
+        <tr><td>0x9420</td><td>tx_trigger_ctl</td><td>&mdash;</td><td>8-bit PIO</td></tr>
+        <tr class="hot"><td>0x9440</td><td>gpio_rffe_0</td><td>9</td><td>RFFE control &mdash; SPDT, bias, enables</td></tr>
+        <tr><td>0x9500</td><td>arbiter_0</td><td>6</td><td>SPI arbiter</td></tr>
+        <tr><td>0x00010000</td><td>axi_ad9361_0</td><td>&mdash;</td><td>ADI core register file</td></tr>
+        <tr><td>0x00020000</td><td>ram</td><td>&mdash;</td><td>code + data, 128 KB</td></tr>
+        <tr><td>0x10000000</td><td>wishbone_master_0</td><td>10</td><td>Avalon&rarr;Wishbone bridge</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>IRQ 0 is unused. Note the A2 arithmetic: with 32 KB of RAM the base becomes <code>0x8000</code> and the RAM span <strong>overlaps the entire peripheral map</strong>.</p>
+
+  <h3 class="axis">Level B &mdash; the system's 99 external ports</h3>
+  <p>The generated <code>nios_system</code> component exposes <strong>99 ports</strong> to the fabric, of which <strong>96 are connected</strong> in the hosted build. Grouped by the instance that exports them: 42 belong to <code>axi_ad9361_0</code> (LVDS interface, sample conduits, overflow flags), 12 to the two tamers, 10 to the Wishbone bridge, 7 to I&sup2;C, 4 each to the two SPI masters, 3 to expansion GPIO, 3 to the arbiter, 2 each to the clock, the control PIO, the RFFE PIO, the clock/reset bridges and the command UART.</p>
+  <p>Ports that are tied off, left open, or absent entirely:</p>
+  <ul>
+    <li><code>reset_reset_n</code> &mdash; tied <code>'1'</code></li>
+    <li>Every <code>_n</code> half of the AD9361 LVDS interface &mdash; tied <code>'0'</code> or left <code>open</code>; Quartus infers the pair from the pin assignments</li>
+    <li><code>ad9361_dac_sync_in_sync</code>, <code>oc_i2c_arst_i</code>, both tamers' <code>ts_sync_in</code> and <code>ts_pps</code> &mdash; tied <code>'0'</code></li>
+    <li>Both tamers' <code>ts_sync_out</code> &mdash; <code>open</code> (and hardwired <code>'0'</code> inside the IP anyway)</li>
+    <li><strong>All three arbiter ports</strong> &mdash; absent from the port map entirely</li>
+    <li><strong>All ten Wishbone ports</strong> &mdash; mapped to signals nothing else drives or reads</li>
+    <li><code>gpio_rffe_0</code> bit 4 &mdash; a dead output; its consumer is commented out</li>
+  </ul>
+</section>
+
+<section>
+  <h2>What it does</h2>
+  <p class="sub">nine packet families, with a real example of each</p>
+  <p>Everything the NIOS does happens in one of two places, and the distinction governs performance:</p>
+<pre>if (have_request) {
+    handler-&gt;exec(&amp;pkt);                 <i>// SYNCHRONOUS &#8212; blocking, uninterruptible</i>
+    command_uart_write_response(pkt.resp);
+} else {
+    <i>// VCTCXO tamer state machine</i>
+    pkt_handlers[i].<b>do_work()</b>;             <i>// DEFERRED &#8212; only when no packet is pending</i>
+}</pre>
+  <p><strong>Deferred work is starved by packet traffic.</strong> A host that hammers the command UART back to back stops the retune queue and the RFIC write queue from advancing at all. This is precisely why libbladeRF's RFIC spin-wait sleeps 100&nbsp;&micro;s between polls &mdash; the sleep is what lets the NIOS reach <code>do_work()</code>.</p>
+  <p>Every packet is 16 bytes each way, dispatched on byte 0. The magic set is enforced <em>in hardware</em> by the command UART before the NIOS ever sees it.</p>
+
+  <div class="stagerow"><span class="sn">A</span><h3>8x8 &mdash; LMS6, Si5338, VCTCXO mode, triggers</h3></div>
+  <p>Arm the RX trigger as master (<code>ARM|MASTER</code> = 0x05 into the RX trigger PIO):</p>
+<pre>41 04 01 00 00 05 00 00 00 00 00 00 00 00 00 00
+<i>^A ^t ^w    ^a ^d</i></pre>
+
+  <div class="stagerow"><span class="sn">B</span><h3>8x16 &mdash; trim DAC, INA219, IQ correction</h3></div>
+  <p>Set the AD5621 VCTCXO trim DAC to mid-scale. The NIOS clocks out exactly two bytes, <code>0x80 0x00</code>, on peripheral SPI slave-select 0:</p>
+<pre>42 03 01 00 00 00 80 00 00 00 00 00 00 00 00 00
+<i>            ^lo ^hi</i></pre>
+  <p>Readback never touches the bus &mdash; the AD5621 has no readback path, so the NIOS returns a cached copy.</p>
+
+  <div class="stagerow"><span class="sn">C</span><h3>8x32 &mdash; version, control register, fastlock, RFFE CSR</h3></div>
+  <p>Read the FPGA version. The response decodes to <strong>v0.16.0</strong>:</p>
+<pre>&#8594; 43 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+&#8592; 43 00 02 00 00 00 10 00 00 00 00 00 00 00 00 00
+<i>        ^success      ^data LE = 0x00001000</i></pre>
+  <p>Force LED2 on (<code>led_mode</code> bit 15 plus LED bits 14:12):</p>
+<pre>43 01 01 00 00 00 A0 00 00 00 00 00 00 00 00 00</pre>
+  <p>The NIOS has <strong>no LED logic whatsoever</strong> &mdash; the LEDs are three bits of a PIO, and with <code>led_mode</code> clear the FPGA drives them autonomously (LED1 blinks, LED2 = TX underflow, LED3 = RX overflow).</p>
+
+  <div class="stagerow"><span class="sn">D</span><h3>8x64 &mdash; timestamps</h3></div>
+  <p>Read the RX timestamp. One target, read-only; the NIOS performs eight successive byte reads from the tamer and assembles them LSB-first:</p>
+<pre>44 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00</pre>
+
+  <div class="stagerow"><span class="sn">E</span><h3>16x64 &mdash; the AD9361, both ways</h3></div>
+  <p>This family carries two very different targets. <strong>Target 0x00 is raw SPI</strong> &mdash; read AD9361 register 0x037:</p>
+<pre>45 00 00 00 37 00 00 00 00 00 00 00 00 00 00 00
+<i>      ^read ^addr LE</i></pre>
+  <p><strong>Target 0x01 is the RFIC command interface</strong>, where the address packs a command and a channel. Tune RX1 to 2.400 GHz (command 0x04, channel 0):</p>
+<pre>45 01 01 00 04 00 00 18 0D 8F 00 00 00 00 00 00
+<i>      ^wr   ^addr ^--- 2400000000 LE ---^</i></pre>
+  <p>Here is the asymmetry that matters: <strong>RFIC reads execute immediately; RFIC writes are only enqueued.</strong> The response means &ldquo;accepted&rdquo;, not &ldquo;done&rdquo;. The actual <code>ad9361_set_rx_lo_freq()</code> runs later in <code>do_work()</code>, through a three-tick state machine &mdash; one transition per main-loop pass. The host discovers completion by polling a status command, which works only because reads bypass the queue.</p>
+
+  <div class="stagerow"><span class="sn">F</span><h3>32x32 &mdash; expansion port, ADI AXI, Wishbone</h3></div>
+  <p>Set expansion-port bits 3:0 to <code>0b0101</code> without disturbing the rest. The address field is a <strong>bitmask</strong>, and the NIOS performs the read-modify-write:</p>
+<pre>4B 00 01 00 0F 00 00 00 05 00 00 00 00 00 00 00
+<i>      ^wr   ^--- mask ---^ ^--- data ---^</i></pre>
+
+  <div class="stagerow"><span class="sn">G</span><h3>Legacy &mdash; the FX3-era format</h3></div>
+  <p>Kept for backward compatibility. Byte 1 is a config word packing direction, device and count. Read LMS6 register 0x2F &mdash; this is one of the repo's own verified test vectors:</p>
+<pre>&#8594; 4e 91 2f ff 00 ...   <i>cfg 0x91 = READ | DEV_LMS | count 1</i>
+&#8592; 4e 91 2f 17 ff ...   <i>returned 0x17</i></pre>
+  <p>Multi-byte parameters are assembled across <em>successive packets</em> using file-static accumulators &mdash; genuine cross-packet state living in the NIOS.</p>
+
+  <div class="stagerow"><span class="sn">H</span><h3>retune2 &mdash; the one Chapter 2 cares about</h3></div>
+  <p>An immediate RX retune to stored profile 0, RFFE slot 3, highband. Timestamp zero means &ldquo;now&rdquo;, and the whole thing runs synchronously inside the handler:</p>
+<pre>55 00 00 00 00 00 00 00 00 00 00 03 80 01 00 00
+<i>^U ^------ timestamp = 0 (NOW) ------^ ^p ^rf ^port ^spdt</i></pre>
+  <p>The NIOS then performs, in order: load the 16-byte fastlock profile into the RFFE slot if it is not already resident, one SPI write to register 0x25A to recall it, a read-modify-write of register 0x004 for port selection, and a read-modify-write of the RFFE GPIO for the SPDT switches. Any non-zero, non-sentinel timestamp instead enqueues the request and defers activation to <code>do_work()</code>.</p>
+</section>
+
+<section>
+  <h2>Assembly and toolchain</h2>
+  <p class="sub">the short answer is: no assembly at all</p>
+  <p>A sweep of the entire repository &mdash; <code>find</code> for <code>*.S</code>, <code>*.s</code> and <code>*.asm</code>, greps for <code>__asm__</code> and <code>asm volatile</code>, and greps for Nios II builtins like <code>__builtin_wrctl</code> and <code>ALT_CI_*</code> &mdash; returns <strong>zero hits</strong>. The build system even declares an empty assembly source list, and the assemble rules it carries are dead code.</p>
+  <p><strong>The firmware is 100% C.</strong> Even the lowest-level register accessors are not inline assembly: <code>IORD_32DIRECT</code> and <code>IOWR_32DIRECT</code> expand to the GCC builtins <code>__builtin_ldwio</code> and <code>__builtin_stwio</code>, which the compiler backend emits as single cache-bypassing load/store instructions. Those headers live in the Quartus installation, not the repo.</p>
+  <p>Assembly <em>does</em> reach the final image, but none of it is Nuand's and none of it is checked in: Altera's generated <code>crt0.S</code> (the C runtime startup that clears <code>.bss</code>, sets up the stack and global pointer, and calls into <code>main</code>), the HAL's exception and IRQ entry stubs, and pre-built newlib routines.</p>
+
+  <div class="scroller">
+    <p class="tbl-title">Toolchain</p>
+    <table>
+      <thead><tr><th>Stage</th><th>Tool / setting</th></tr></thead>
+      <tbody>
+        <tr><td>Compiler</td><td><code>nios2-elf-gcc</code> from the Quartus install</td></tr>
+        <tr class="hot"><td>Flags</td><td><code>-Os -fshort-enums -g -Wall -Wextra -Werror</code></td></tr>
+        <tr><td>Linker</td><td><code>nios2-elf-g++</code>, then <code>nios2-elf-insert</code>, then <code>nios2-stackreport</code></td></tr>
+        <tr><td>BSP</td><td>bare-metal HAL &mdash; no RTOS</td></tr>
+        <tr><td>C library</td><td>reduced newlib, reduced + lightweight drivers, 4 file descriptors</td></tr>
+        <tr><td>Exit handling</td><td>disabled &mdash; <code>main()</code> is expected never to return</td></tr>
+        <tr><td>Entry point</td><td>plain <code>main()</code>, not <code>alt_main()</code> &mdash; full HAL init runs first</td></tr>
+        <tr><td>Image</td><td><code>elf2hex</code> &rarr; on-chip RAM init &rarr; baked into the bitstream</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>The VHDL it drives</h2>
+  <p class="sub">four Nuand IP blocks, each with a register map the firmware writes by hand</p>
+  <p>Yes &mdash; VHDL is very much involved. Four Nuand blocks sit directly on the NIOS's data bus, and the firmware talks to them through raw byte and word accesses at fixed offsets. None of these register maps is generated; they are hand-matched between the VHDL and the C.</p>
+
+  <h3 class="axis">command_uart &#183; 0x9120 &#183; IRQ 7</h3>
+  <p>A 4 Mbaud soft UART with 128-bit request and response registers &mdash; exactly one 16-byte packet each way. Byte-addressed: offsets 0/4/8/12 are the four words of the packet, and offset 16 is a control byte whose bit 0 enables the interrupt.</p>
+  <p>Two behaviours worth knowing. Reading the request register is what <strong>clears the interrupt</strong>. And writing word 0 of the response <strong>starts transmission immediately</strong>, before words 1&ndash;3 have been written &mdash; safe only because each byte takes about 200 clocks.</p>
+
+  <h3 class="axis">time_tamer &#183; 0x9160 (RX) / 0x9140 (TX) &#183; IRQ 3 / 2</h3>
+  <p>Offsets 0&ndash;7 read the 64-bit timestamp; <strong>reading offset 0 latches the counter</strong> so the following seven byte reads are coherent. Writing offsets 0&ndash;7 loads a compare value, and offset 8 is a command register: write <code>0</code> to arm the interrupt, write <code>1</code> to acknowledge it.</p>
+  <p>The counter increments <strong>every other</strong> <code>ts_clock</code> edge &mdash; one count per two sample clocks. Offset 9 exposes a <code>status_past</code> flag meaning &ldquo;you asked for a time already gone&rdquo;; <strong>the firmware never reads it</strong>, so that condition is invisible to software.</p>
+
+  <h3 class="axis">arbiter &#183; 0x9500 &#183; IRQ 6</h3>
+  <p>A two-requester round-robin guarding AD9361 SPI. Offset 0 bit 0 requests, offset 1 bit 0 reports the grant, offset 0 bit 1 releases. The firmware wraps <em>every</em> AD9361 SPI access in a lock/spin/unlock &mdash; a write, an unbounded polled read, and a write, on top of each transaction.</p>
+
+  <h3 class="axis">wishbone_master &#183; 0x10000000 &#183; IRQ 10</h3>
+  <p>A transparent Avalon-to-Wishbone address window, not a register block. See the defects section &mdash; on this image it is not functional.</p>
+</section>
+
+<section>
+  <h2>Dead code and defects</h2>
+  <p class="sub">found while tracing; all read directly from source</p>
+  <p>A deep read turns up a fair amount of code that cannot execute on this board, and a few genuine bugs. None of these are speculative &mdash; each was read out of the RTL or the C.</p>
+
+  <div class="mods">
+    <div class="mod"><div class="mod-name">VCTCXO tamer is a stub</div><div class="mod-src">dead</div><div class="mod-job">On the micro, <code>vctcxo_tamer_0</code> is instantiated as a <b>256-byte on-chip RAM with no interrupt</b>, not the Nuand tamer IP. Its ISR can therefore never fire, and the entire coarse/fine VCTCXO discipline state machine in <code>main()</code> is <b>unreachable dead code</b>. On bladeRF1 the same code drives real hardware on IRQ 0.</div></div>
+    <div class="mod"><div class="mod-name">Wishbone master is inert</div><div class="mod-src">bug</div><div class="mod-job">All ten <code>wbm_wb_*</code> ports map to top-level signals that <b>nothing drives or reads</b> &mdash; including the Wishbone clock and the acknowledge. Writes vanish; a read would park the state machine waiting for an ack that never comes, holding <code>waitrequest</code> high and <b>hanging the NIOS data master indefinitely</b>.</div></div>
+    <div class="mod"><div class="mod-name">Scheduled timestamp MSB</div><div class="mod-src">bug</div><div class="mod-job">The tamer scheduling routine writes byte 7 as <code>(time &gt;&gt; 54)</code> where it should be <code>&gt;&gt; 56</code>, so bits 56&ndash;63 of every scheduled retune timestamp carry bits 61&ndash;54 instead. Harmless below 2<sup>54</sup> samples, but wrong.</div></div>
+    <div class="mod"><div class="mod-name">Trim DAC, wrong part</div><div class="mod-src">dead</div><div class="mod-job">The VCTCXO tuning state machine issues the bladeRF1 DAC161S055 <b>three-byte</b> command format, but the micro is fitted with an <b>AD5621</b> that takes two bytes. Unobservable only because the state machine never runs.</div></div>
+    <div class="mod"><div class="mod-name">IQ and AGC correction</div><div class="mod-src">stub</div><div class="mod-job">Two 8x16 targets acknowledge with SUCCESS and do nothing &mdash; the PIOs they would drive are not instantiated on the micro, so the compiler selects empty function bodies.</div></div>
+    <div class="mod"><div class="mod-name">Arbiter, half-wired</div><div class="mod-src">mixed</div><div class="mod-job">The fabric-facing channel is <b>absent from the hosted port map entirely</b>, and IRQ 6 is wired in Qsys with <b>no ISR registered</b>. But the NIOS's own channel is internal and live, so the lock/spin/unlock around every SPI access is real cost. The source comment saying it &ldquo;applies only to bladeRF1&rdquo; is wrong.</div></div>
+    <div class="mod"><div class="mod-name">Unbounded spin loops</div><div class="mod-src">risk</div><div class="mod-job">The I&sup2;C completion routine has three untimed spins and the SPI arbiter lock a fourth. With no watchdog anywhere in the system, a stuck bus is unrecoverable short of reconfiguring the FPGA.</div></div>
+    <div class="mod"><div class="mod-name">Stale break vector</div><div class="mod-src">cosmetic</div><div class="mod-job">The CPU's <code>breakSlave</code> names an instance <code>nios2_qsys_0</code> that does not exist in this system &mdash; a leftover from an older system name. Inert, because Qsys resolves the break vector from the debug module regardless.</div></div>
+  </div>
+</section>

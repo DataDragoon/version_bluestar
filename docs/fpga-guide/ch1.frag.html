@@ -1,0 +1,229 @@
+<section>
+  <h2>Two things that are easy to confuse</h2>
+  <p class="sub">who wrote a block, versus where it is wired in</p>
+  <p>Every module in this chapter can be described on two <em>independent</em> axes, and mixing them up is the fastest way to misread the design.</p>
+
+  <h3 class="axis">Axis one &mdash; who wrote the IP</h3>
+  <p>Four suppliers contribute code, one directory each under <code>hdl/fpga/ip/</code>:</p>
+  <div class="mods">
+    <div class="mod"><div class="mod-name">Nuand</div><div class="mod-src nuand">nuand</div><div class="mod-job">The company that designs and sells the bladeRF. Their own VHDL &mdash; the datapath, the command UART, the timestamp tamers, the arbiter.</div></div>
+    <div class="mod"><div class="mod-name">Altera</div><div class="mod-src">altera</div><div class="mod-job">The <b>FPGA chip vendor</b> (bought by Intel in 2015, spun back out as Altera in 2025). Stock library parts that ship with Quartus &mdash; PLLs, FIFOs, SPI and I/O controllers, and the NIOS II soft CPU itself.</div></div>
+    <div class="mod"><div class="mod-name">Analog Devices</div><div class="mod-src adi">adi</div><div class="mod-job">Makes the <b>AD9361</b> transceiver. Supplies <code>axi_ad9361</code>, the core that drives the LVDS link to their own chip.</div></div>
+    <div class="mod"><div class="mod-name">OpenCores</div><div class="mod-src">opencores</div><div class="mod-job">A community open-source IP repository. The I&sup2;C master came from there; Nuand wrapped it for Avalon.</div></div>
+  </div>
+
+  <h3 class="axis">Axis two &mdash; where it is instantiated</h3>
+  <p>Independently of who wrote it, a block sits in one of two places:</p>
+  <ul>
+    <li><strong>Inside the Qsys system.</strong> It is on the NIOS&rsquo;s Avalon bus, gets a base address, and may get an IRQ. These are the modules the firmware can read and write.</li>
+    <li><strong>Hand-instantiated in VHDL</strong> &mdash; in <code>bladerf-hosted.vhd</code>, <code>rx.vhd</code> or <code>tx.vhd</code>. These are wired directly to pins and to each other, and the NIOS cannot address them at all.</li>
+  </ul>
+
+  <div class="note">
+    <p class="h">Where I got this wrong</p>
+    <p>An earlier version of this chapter badged some modules &ldquo;qsys&rdquo; alongside &ldquo;nuand&rdquo; and &ldquo;altera&rdquo;, as if all three were vendors. They are not. <strong>Qsys is a tool, not a supplier</strong> &mdash; it is Altera&rsquo;s system builder that generates the interconnect. Saying a block is &ldquo;Qsys&rdquo; says nothing about who wrote it. The badges below now name the vendor only; the section a module appears in tells you where it is wired.</p>
+  </div>
+
+  <p>The cross product is real, not theoretical. <code>command_uart</code> is Nuand IP living inside Qsys; <code>rffe_spi</code> is Altera IP inside Qsys; <code>fx3_gpif</code> is Nuand IP outside it; and <code>nios2</code> &mdash; the CPU this whole guide revolves around &mdash; is <em>Altera</em> IP, not Nuand&rsquo;s.</p>
+</section>
+<section>
+  <h2>How the fabric is organised</h2>
+  <p class="sub">source of truth &middot; bladerf-hosted.qip + bladerf.qip</p>
+  <p>The FPGA is not a flat pile of modules. It is three clock domains with carefully guarded crossings between them, and almost every block belongs unambiguously to one of them. Get the domains right and the module list explains itself.</p>
+  <p>The build manifest is authoritative: <code>bladerf-hosted.qip</code> lists exactly which files are compiled in. Anything not in it &mdash; and there are some notable absences &mdash; is not in your bitstream, whatever else exists in the tree.</p>
+
+  <figure>
+    <svg viewBox="0 0 960 512" role="img" aria-label="Clock domain map. Every block is labelled with the clock it runs on. Domain 1 is fx3_pclk at about 100 megahertz, supplied by the FX3, and contains fx3_gpif. Domain 2 is l_clk at twice the sample rate, supplied by the AD9361, and contains rx.vhd, tx.vhd and axi_ad9361. Domain 3 is sys_clock at 80 megahertz from an internal PLL, and contains the entire Nios system. Dual-clock FIFOs straddle the boundary between domains 1 and 2; the time tamer straddles domains 2 and 3.">
+      <defs>
+        <marker id="ka" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="kb" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 10 0 L 0 5 L 10 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="kr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--rust)"/>
+        </marker>
+      </defs>
+
+      <rect x="150" y="26" width="650" height="452" fill="none" stroke="var(--indigo)" stroke-width="1.5" stroke-dasharray="7 4"/>
+      <text x="160" y="46" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="var(--indigo)">FPGA &#183; Cyclone V</text>
+
+      <rect x="170" y="142" width="152" height="94" fill="var(--surface-2)" stroke="var(--slate)" stroke-width="1.25"/>
+      <rect x="394" y="142" width="298" height="94" fill="var(--rust)" opacity=".10"/>
+      <rect x="394" y="142" width="298" height="94" fill="none" stroke="var(--rust)" stroke-width="1.25"/>
+      <rect x="170" y="338" width="522" height="112" fill="var(--indigo)" opacity=".10"/>
+      <rect x="170" y="338" width="522" height="112" fill="none" stroke="var(--indigo)" stroke-width="1.25"/>
+
+      <g font-family="Archivo, sans-serif" font-size="11" font-weight="700">
+        <text x="170" y="120" fill="var(--slate)">DOMAIN 1</text>
+        <text x="394" y="120" fill="var(--rust)">DOMAIN 2</text>
+        <text x="170" y="330" fill="var(--indigo)">DOMAIN 3</text>
+      </g>
+      <g font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)">
+        <text x="238" y="120">fx3_pclk &#183; ~100 MHz</text>
+        <text x="462" y="120">l_clk &#183; 2 &#215; f_s (20 MHz at 10 Msps)</text>
+        <text x="238" y="330">sys_clock &#183; 80 MHz</text>
+      </g>
+
+      <rect x="14" y="158" width="112" height="62" fill="none" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="70" y="181" font-family="Archivo, sans-serif" font-size="13" font-weight="700" fill="var(--rust)" text-anchor="middle">FX3</text>
+      <text x="70" y="197" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--rust)" text-anchor="middle">USB controller</text>
+      <text x="70" y="211" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">supplies D1 clk</text>
+
+      <rect x="824" y="158" width="112" height="62" fill="none" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="880" y="181" font-family="Archivo, sans-serif" font-size="13" font-weight="700" fill="var(--rust)" text-anchor="middle">AD9361</text>
+      <text x="880" y="197" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--rust)" text-anchor="middle">Analog Devices</text>
+      <text x="880" y="211" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">supplies D2 clk</text>
+
+      <rect x="182" y="158" width="128" height="62" fill="var(--surface)" stroke="currentColor"/>
+      <text x="246" y="184" font-family="JetBrains Mono, monospace" font-size="11.5" fill="currentColor" text-anchor="middle">fx3_gpif</text>
+      <text x="246" y="204" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)" text-anchor="middle">runs on fx3_pclk</text>
+
+      <rect x="406" y="158" width="128" height="62" fill="var(--surface)" stroke="currentColor"/>
+      <text x="470" y="180" font-family="JetBrains Mono, monospace" font-size="11.5" fill="currentColor" text-anchor="middle">rx.vhd tx.vhd</text>
+      <text x="470" y="202" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)" text-anchor="middle">runs on l_clk</text>
+
+      <rect x="550" y="158" width="130" height="62" fill="var(--surface)" stroke="currentColor"/>
+      <text x="615" y="180" font-family="JetBrains Mono, monospace" font-size="11.5" fill="currentColor" text-anchor="middle">axi_ad9361</text>
+      <text x="615" y="202" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)" text-anchor="middle">runs on l_clk</text>
+
+      <line x1="358" y1="136" x2="358" y2="242" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+      <rect x="330" y="158" width="56" height="62" fill="var(--surface)" stroke="var(--rule-2)"/>
+      <text x="358" y="182" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--ink-2)" text-anchor="middle">FIFOs</text>
+      <text x="358" y="196" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">wr: D1</text>
+      <text x="358" y="207" font-family="JetBrains Mono, monospace" font-size="8" fill="var(--slate)" text-anchor="middle">rd: D2</text>
+
+      <g stroke="currentColor" stroke-width="1.25">
+        <line x1="126" y1="189" x2="178" y2="189" marker-end="url(#ka)" marker-start="url(#kb)"/>
+        <line x1="310" y1="189" x2="328" y2="189"/>
+        <line x1="388" y1="189" x2="404" y2="189"/>
+        <line x1="534" y1="189" x2="548" y2="189"/>
+        <line x1="680" y1="189" x2="820" y2="189" marker-end="url(#ka)" marker-start="url(#kb)"/>
+      </g>
+      <text x="152" y="178" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">GPIF</text>
+      <text x="750" y="178" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--slate)" text-anchor="middle">LVDS &#183; 8 pairs each way</text>
+
+      <rect x="516" y="258" width="164" height="58" fill="var(--surface)" stroke="var(--rule-2)"/>
+      <text x="598" y="277" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--ink-2)" text-anchor="middle">time_tamer</text>
+      <text x="598" y="291" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--rust)" text-anchor="middle">counter side: l_clk</text>
+      <text x="598" y="305" font-family="JetBrains Mono, monospace" font-size="8.5" fill="var(--indigo)" text-anchor="middle">register side: sys_clock</text>
+      <g stroke="currentColor" stroke-width="1" stroke-dasharray="4 3">
+        <line x1="598" y1="256" x2="598" y2="240" marker-end="url(#ka)" marker-start="url(#kb)"/>
+        <line x1="598" y1="318" x2="598" y2="334" marker-end="url(#ka)" marker-start="url(#kb)"/>
+      </g>
+      <text x="690" y="286" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">handshake crosses D2 &#8594; D3</text>
+
+      <line x1="246" y1="240" x2="246" y2="334" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#kb)" marker-start="url(#ka)"/>
+      <text x="256" y="278" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">synchronizer</text>
+      <text x="256" y="291" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--slate)">control bits D3 &#8594; D1</text>
+
+      <rect x="182" y="354" width="498" height="84" fill="var(--surface)" stroke="var(--indigo)"/>
+      <text x="196" y="377" font-family="Archivo, sans-serif" font-size="12" font-weight="700" fill="var(--indigo)">nios_system</text>
+      <text x="330" y="377" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--indigo)">&#8212; everything here runs on sys_clock</text>
+      <text x="196" y="399" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor">nios2 &#183; ram &#183; command_uart &#183; rffe_spi &#183; peripheral_spi</text>
+      <text x="196" y="416" font-family="JetBrains Mono, monospace" font-size="9.5" fill="currentColor">gpio_rffe_0 &#183; control &#183; i2c &#183; arbiter &#183; wishbone &#183; xb_gpio</text>
+
+      <path d="M 70 220 L 70 396 L 178 396" fill="none" stroke="var(--rust)" stroke-width="1.25" marker-end="url(#kr)"/>
+      <text x="14" y="268" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)">command</text>
+      <text x="14" y="280" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)">UART 4 Mbaud</text>
+
+      <path d="M 880 220 L 880 396 L 684 396" fill="none" stroke="var(--rust)" stroke-width="1.25" marker-end="url(#kr)"/>
+      <text x="946" y="268" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)" text-anchor="end">SPI 40 MHz</text>
+      <text x="946" y="280" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--rust)" text-anchor="end">+ RFFE GPIO</text>
+
+      <line x1="14" y1="466" x2="946" y2="466" stroke="var(--rule)"/>
+      <rect x="14" y="482" width="13" height="13" fill="var(--surface-2)" stroke="var(--slate)"/>
+      <text x="34" y="493" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--ink-2)">D1 fx3_pclk &#183; clock comes from the FX3</text>
+      <rect x="330" y="482" width="13" height="13" fill="var(--rust)" opacity=".35"/>
+      <rect x="330" y="482" width="13" height="13" fill="none" stroke="var(--rust)"/>
+      <text x="350" y="493" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--ink-2)">D2 l_clk &#183; clock comes from the AD9361</text>
+      <rect x="650" y="482" width="13" height="13" fill="var(--indigo)" opacity=".35"/>
+      <rect x="650" y="482" width="13" height="13" fill="none" stroke="var(--indigo)"/>
+      <text x="670" y="493" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--ink-2)">D3 sys_clock &#183; generated inside the FPGA</text>
+    </svg>
+    <figcaption><b>Every block labelled with the clock it runs on.</b> Only <b>D3</b> is generated inside the FPGA &mdash; D1 is supplied by the FX3, D2 by the AD9361. Two blocks deliberately straddle a boundary: the <b>FIFOs</b> (written in D1, read in D2) and the <b>time_tamer</b> (counter in D2, registers in D3), which is exactly why a handshake is needed to read a timestamp.</figcaption>
+  </figure>
+</section>
+<section>
+  <h2>Clocking, reset and domain crossing</h2>
+  <p class="sub">the plumbing every other block depends on</p>
+  <div class="mods">
+    <div class="mod"><div class="mod-name">system_pll</div><div class="mod-src">altera</div><div class="mod-job">Makes the <b>80&nbsp;MHz</b> system clock from the 38.4&nbsp;MHz reference. Everything in the Qsys system runs on it.</div></div>
+    <div class="mod"><div class="mod-name">fx3_pll</div><div class="mod-src">altera</div><div class="mod-job">Generates the FX3 GPIF clock domain used by the host-interface side.</div></div>
+    <div class="mod"><div class="mod-name">clk_ctrl</div><div class="mod-src">altera</div><div class="mod-job">Clock-control primitive gating each PLL output; one instance per PLL.</div></div>
+    <div class="mod"><div class="mod-name">pll_reset</div><div class="mod-src nuand">nuand</div><div class="mod-job">Reset sequencer that holds a PLL down until it is stable and locked, then releases downstream logic.</div></div>
+    <div class="mod"><div class="mod-name">reset_synchronizer</div><div class="mod-src nuand">nuand</div><div class="mod-job">Asynchronous assert, synchronous de-assert. One per domain &mdash; pclk, sys, rx, tx.</div></div>
+    <div class="mod"><div class="mod-name">synchronizer</div><div class="mod-src nuand">nuand</div><div class="mod-job">Three-flop crossing for <b>single bits</b>. The most-instantiated block in the design &mdash; roughly twenty copies carry <code>meta_en</code>, <code>packet_en</code>, <code>usb_speed</code>, MIMO enables and trigger state between domains.</div></div>
+    <div class="mod"><div class="mod-name">handshake</div><div class="mod-src nuand">nuand</div><div class="mod-job">Request/acknowledge crossing for <b>multi-bit buses</b>, where a plain synchronizer would let different bits land on different cycles and tear the value. Five instances, all carrying a 64-bit timestamp <em>out of</em> the AD9361 sample domain: one into the <b>FX3 GPIF domain</b> (so <code>fx3_gpif</code> can judge whether a TX burst is still in the future), and four into the <b>Nios 80 MHz domain</b> &mdash; a <code>snap</code> and a <code>current</code> copy in each of the two timestamp tamers.</div></div>
+    <div class="mod"><div class="mod-name">ps_sync</div><div class="mod-src nuand">nuand</div><div class="mod-job"><b>Power-supply</b> synchronization &mdash; not phase-shift. Drives the switching regulators with an LFSR-hopped frequency list to spread their emissions away from the RF band.</div></div>
+    <div class="mod"><div class="mod-name">set_clear_ff</div><div class="mod-src nuand">nuand</div><div class="mod-job">Small set/clear flip-flop primitive used by the datapath control logic.</div></div>
+  </div>
+</section>
+<section>
+  <h2>Host interface</h2>
+  <p class="sub">the sample pipe to the FX3, entirely separate from the control path</p>
+  <div class="mods">
+    <div class="mod"><div class="mod-name">fx3_gpif</div><div class="mod-src nuand">nuand</div><div class="mod-job">The GPIF&nbsp;II state machine. Moves IQ samples between the FIFOs and the FX3 bus, and <b>prepends or strips the 16-byte metadata header</b> when metadata mode is on. Runs in the PCLK domain.</div></div>
+    <div class="mod"><div class="mod-name">fx3_gpif_p</div><div class="mod-src nuand">nuand</div><div class="mod-job">Package of types and constants for the above.</div></div>
+    <div class="mod"><div class="mod-name">common_dcfifo</div><div class="mod-src">altera</div><div class="mod-job">The dual-clock FIFO primitive underneath all five FIFO wrappers &mdash; the actual sample-domain to PCLK-domain crossing.</div></div>
+    <div class="mod"><div class="mod-name">rx_fifo / tx_fifo</div><div class="mod-src">altera</div><div class="mod-job">Sample FIFOs, 8192 samples each. RX is 64-bit in / 32-bit out; TX is 32-bit in / 64-bit out.</div></div>
+    <div class="mod"><div class="mod-name">rx_meta_fifo / tx_meta_fifo</div><div class="mod-src">altera</div><div class="mod-job">Parallel 2048-word metadata FIFOs carrying the timestamps and flags that ride alongside each buffer.</div></div>
+    <div class="mod"><div class="mod-name">lb_fifo</div><div class="mod-src">altera</div><div class="mod-job">512-sample loopback FIFO for digital TX&rarr;RX loopback without leaving the FPGA.</div></div>
+  </div>
+</section>
+<section>
+  <h2>Sample datapath</h2>
+  <p class="sub">rx.vhd and tx.vhd, both in the AD9361 sample clock domain</p>
+  <div class="mods">
+    <div class="mod"><div class="mod-name">axi_ad9361</div><div class="mod-src adi">adi</div><div class="mod-job">Analog Devices' interface core. Owns the <b>LVDS physical link</b> to the AD9361 &mdash; deserialises RX at 4:1, serialises TX &mdash; and emits <code>ad9361.clock</code>, the sample clock that defines the whole third domain.</div></div>
+    <div class="mod"><div class="mod-name">rx.vhd</div><div class="mod-src nuand">nuand</div><div class="mod-job">The RX chain: takes ADC samples, pushes them into the FIFOs, and owns the RX timestamp reset.</div></div>
+    <div class="mod"><div class="mod-name">tx.vhd</div><div class="mod-src nuand">nuand</div><div class="mod-job">The TX chain: drains the FIFOs into DAC samples, handles burst timing against the TX timestamp.</div></div>
+    <div class="mod"><div class="mod-name">fifo_writer</div><div class="mod-src nuand">nuand</div><div class="mod-job">Inside <code>rx.vhd</code>. Writes samples into the RX FIFO and <b>generates the metadata header</b> &mdash; timestamp, flags, status &mdash; for each buffer.</div></div>
+    <div class="mod"><div class="mod-name">fifo_reader</div><div class="mod-src nuand">nuand</div><div class="mod-job">Inside <code>tx.vhd</code>. Reads the TX FIFO, interprets metadata, and releases bursts at their scheduled timestamps.</div></div>
+    <div class="mod"><div class="mod-name">fifo_readwrite_p</div><div class="mod-src nuand">nuand</div><div class="mod-job">Shared package defining the state machines and record types those two use.</div></div>
+    <div class="mod"><div class="mod-name">signal_generator</div><div class="mod-src nuand">nuand</div><div class="mod-job">Synthetic sample source inside <code>rx.vhd</code> &mdash; substitutes a known tone or ramp for real ADC data in test and loopback modes.</div></div>
+    <div class="mod"><div class="mod-name">rx_packet_generator</div><div class="mod-src nuand">nuand</div><div class="mod-job">Top-level synthetic packet source, used to exercise the RX path with no RF present.</div></div>
+    <div class="mod"><div class="mod-name">trigger</div><div class="mod-src nuand">nuand</div><div class="mod-job">Instanced once in each of <code>rx.vhd</code> and <code>tx.vhd</code>. A handful of gates: passes the sample stream only when <b>armed and the shared trigger line fires</b>, and one board designated master drives that line. This is how multiple bladeRFs start capture on the same edge.</div></div>
+  </div>
+</section>
+<section>
+  <h2>The Qsys system</h2>
+  <p class="sub">nios_system &middot; 22 instances, all in the 80 MHz domain</p>
+  <p>Everything below is generated into a single <code>nios_system</code> component instantiated once at the top level. Base addresses and IRQ numbers are assigned by the build script, not hand-written.</p>
+  <div class="mods">
+    <div class="mod"><div class="mod-name">nios2</div><div class="mod-src">altera</div><div class="mod-job">The CPU &mdash; a Nios&nbsp;II/e ("Tiny") soft core at 80&nbsp;MHz. Runs the packet dispatch loop that executes every host command.</div></div>
+    <div class="mod"><div class="mod-name">ram</div><div class="mod-src">altera</div><div class="mod-job">On-chip memory holding the NIOS firmware's code and data; also its reset and exception vector target.</div></div>
+    <div class="mod"><div class="mod-name">system_clock</div><div class="mod-src">altera</div><div class="mod-job">The clock source object defining the single 80&nbsp;MHz domain the whole system shares.</div></div>
+    <div class="mod"><div class="mod-name">command_uart</div><div class="mod-src nuand">nuand</div><div class="mod-job">Receives 16-byte host command packets at 4&nbsp;Mbaud from the FX3's UART, filters them against a magic-byte whitelist in hardware, and raises <b>IRQ&nbsp;7</b>. Base <code>0x9120</code>.</div></div>
+    <div class="mod"><div class="mod-name">rffe_spi</div><div class="mod-src">altera</div><div class="mod-job">SPI master to the <b>AD9361</b>, 40&nbsp;MHz. Every register write that tunes the radio goes through here. Base <code>0x9200</code>.</div></div>
+    <div class="mod"><div class="mod-name">peripheral_spi</div><div class="mod-src">altera</div><div class="mod-job">A second, slower SPI master (8&nbsp;MHz) shared between the VCTCXO trim DAC and the ADF4002, demultiplexed in the fabric by a GPIO bit. Base <code>0x9060</code>.</div></div>
+    <div class="mod"><div class="mod-name">gpio_rffe_0</div><div class="mod-src">altera</div><div class="mod-job">32-bit PIO carrying the RF front-end control lines: <b>the SPDT band switches</b>, bias enables, TXNRX, MIMO enables, AD9361 reset. Base <code>0x9440</code>.</div></div>
+    <div class="mod"><div class="mod-name">control</div><div class="mod-src">altera</div><div class="mod-job">32-bit general control PIO. Carries <code>meta_sync</code>, the bit that gates metadata mode and therefore the timestamp counters. Base <code>0x9040</code>.</div></div>
+    <div class="mod"><div class="mod-name">rx_tamer / tx_tamer</div><div class="mod-src nuand">nuand</div><div class="mod-job">The <b>sample timestamp counters</b>, one per direction, plus a compare register that raises an interrupt at a chosen sample. Counter runs in the sample domain; the register interface is here. Bases <code>0x9160</code> / <code>0x9140</code>.</div></div>
+    <div class="mod"><div class="mod-name">rx_trigger_ctl / tx_trigger_ctl</div><div class="mod-src">altera</div><div class="mod-job">8-bit PIOs arming and reporting the multi-board trigger described above.</div></div>
+    <div class="mod"><div class="mod-name">xb_gpio / xb_gpio_dir</div><div class="mod-src">altera</div><div class="mod-job">32-bit PIO pair &mdash; data and direction &mdash; for the expansion-board header.</div></div>
+    <div class="mod"><div class="mod-name">opencores_i2c</div><div class="mod-src">opencores</div><div class="mod-job">I&sup2;C master reaching the on-board sensors and EEPROM. Base <code>0x90f0</code>.</div></div>
+    <div class="mod"><div class="mod-name">arbiter_0</div><div class="mod-src nuand">nuand</div><div class="mod-job">Two-requester bus arbiter guarding SPI access. In the hosted image the second requester is unconnected, so the NIOS always wins &mdash; but the firmware still pays a lock/poll/unlock around every SPI transaction.</div></div>
+    <div class="mod"><div class="mod-name">wishbone_master_0</div><div class="mod-src nuand">nuand</div><div class="mod-job">Avalon-MM to Wishbone bridge, exported to the top level. Base <code>0x10000000</code>.</div></div>
+    <div class="mod"><div class="mod-name">jtag_uart</div><div class="mod-src">altera</div><div class="mod-job">Debug console over JTAG, IRQ&nbsp;1. Base <code>0x9100</code>.</div></div>
+    <div class="mod"><div class="mod-name">vctcxo_tamer_0</div><div class="mod-src">altera</div><div class="mod-job">Despite the name, on this board it is instantiated as a plain <b>on-chip memory block</b>, not the Nuand tamer IP &mdash; a register window the firmware reads. The actual VCTCXO disciplining state machine runs in NIOS software. Base <code>0x9300</code>.</div></div>
+    <div class="mod"><div class="mod-name">cb_ad9361_0_data<br>rb_ad9361_0_data</div><div class="mod-src">altera</div><div class="mod-job">Clock bridge and reset bridge letting Qsys reason about the AD9361 sample domain as a distinct clock.</div></div>
+  </div>
+</section>
+<section>
+  <h2>What is <em>not</em> in this image</h2>
+  <p class="sub">present in the source tree, absent from the hosted bitstream</p>
+  <p>Worth knowing, because searching the repo will find these and it is easy to assume they are running.</p>
+  <div class="mods">
+    <div class="mod"><div class="mod-name">rfic_spi_controller</div><div class="mod-src nuand">nuand</div><div class="mod-job">A hardware SPI state machine for the AD9361. <b>Not instantiated in any Qsys system.</b> The hosted image uses Altera's <code>altera_avalon_spi</code> instead, with the SPI frame assembled in NIOS software. It appears only in the WLAN image.</div></div>
+    <div class="mod"><div class="mod-name">lms6_spi_controller</div><div class="mod-src nuand">nuand</div><div class="mod-job">For the LMS6002D on the original bladeRF. Irrelevant to this board.</div></div>
+    <div class="mod"><div class="mod-name">tone_generator</div><div class="mod-src nuand">nuand</div><div class="mod-job">Added to the Qsys system only under a conditional branch of the build script; not in the default hosted build.</div></div>
+    <div class="mod"><div class="mod-name">vctcxo_tamer (IP)</div><div class="mod-src nuand">nuand</div><div class="mod-job">The real tamer IP exists, but as noted above the micro substitutes a memory block for it.</div></div>
+  </div>
+
+  <div class="note">
+    <p class="h">Consequence for the radar</p>
+    <p>Because there is no hardware SPI sequencer and no fabric-level retune logic, <strong>every frequency change on this board is software</strong> &mdash; NIOS firmware writing AD9361 registers one transaction at a time. The FPGA contributes only the timestamp compare that says <em>when</em>, and the pins that carry the bits.</p>
+  </div>
+</section>

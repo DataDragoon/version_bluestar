@@ -212,15 +212,28 @@ needs invalidating (`SFCWEngine.invalidate_quick_tune_table()`) after an explici
 this table tried 1–6 GHz at 10 MHz spacing (501 profiles) and it was broken: verified
 against libbladeRF's own source on the Pi
 (`~/bladerf-src/host/libraries/libbladeRF/src/board/bladerf2/bladerf2.c:1419-1513`),
-`bladerf_get_quick_tune()` is not a stateless read — every call *writes* a new fastlock
-profile into a fixed-size on-device table (`board_data->quick_tune_tx/rx_profile`, capped
-at `NUM_BBP_FASTLOCK_PROFILES = 256` in `fpga_common/include/bladerf2_common.h`, one shared
-counter per direction across both TX/RX sub-channels). That counter only resets on a full
-`bladerf_open()`. Past 256 calls it returns `BLADERF_ERR_UNEXPECTED` and leaves the profile
-struct unpopulated — the original code didn't check the return code, so it silently stored
-zeroed/garbage profiles for every frequency past the 256th, which `bladerf_schedule_retune()`
-would then happily retune to the wrong RF state. Symptom on stdout: a wall of
-`[ERROR @ .../bladerf2.c:1427/1456] Reached maximum number of TX/RX quick tune profiles.`
+`bladerf_get_quick_tune()` is not a stateless read — every call allocates a slot and
+*writes* a 16-byte fastlock profile into the AD9361 (only 8 slots per direction) plus a
+copy into Nios RAM (`fastlocks_rx/tx[256]`); `rffe_profile = nios_profile % 8`, so the Nios
+holds the authoritative 256 and re-uploads 16 bytes (18 SPI writes) whenever a slot collides.
+
+**Corrected 2026-08-26 (traced against bladeRF @ 35174c30):** the cap is enforced
+**host-side**, not on the device. `board_data->quick_tune_tx/rx_profile` is a `uint16_t` in
+libbladeRF's own `bladerf2_board_data`, one counter per direction shared across both
+sub-channels, checked against `NUM_BBP_FASTLOCK_PROFILES = 256`
+(`fpga_common/include/bladerf2_common.h`, mirrored in the Nios' `devices.h`). There is no
+device-side counter and no error returned from the device. It resets only on
+`bladerf_open()` or `bladerf_load_fpga()` — `bladerf_device_reset()` against a held handle
+does *not* reset it (our `driver.reset()` is safe only because it does a real close+reopen).
+
+Past 256 calls it returns `BLADERF_ERR_UNEXPECTED` **before writing any field of the
+caller's struct**, so the struct is left *untouched* — not zeroed, not garbage. An unchecked
+return therefore re-submits the PREVIOUS call's profile, and the step captures at the
+**previous frequency**. This corrects the earlier note here: the failure is a stale
+frequency, not a random RF state — which matters because it is the *same observable* as a
+too-short settle (see the `settle_count` regression above). The return-code check is the
+only thing that distinguishes them. Symptom on stdout: a wall of
+`[ERROR @ .../bladerf2.c:1452/1481] Reached maximum number of TX/RX quick tune profiles.`
 repeated once per frequency past the cap, on every `start.py` run. `_ensure_master_quick_tune_table()`
 now raises immediately if `len(freqs) > MAX_QUICK_TUNE_PROFILES` (compile-time check) or if
 `bladerf_get_quick_tune()` ever returns nonzero (runtime check) — fail loud, never store an
@@ -236,6 +249,156 @@ and deferred 2026-08-23 in favor of just picking a range/step that fits).
 **Default step size is 60 MHz (51 steps, 2–5 GHz)** — `sfcwParams.stepSize` in
 `App.jsx` and `SFCWEngine.step_size` both carry it, and the groundstation pushes its
 value to the Pi on connect (see the param-push note above).
+
+## Retune Path — How Tuning Actually Happens (traced 2026-08-26)
+
+Full end-to-end teardown with source citations (host → USB → FX3 → command_uart → Nios II →
+SPI → AD9361): https://claude.ai/code/artifact/3cec93b0-d371-4beb-b59a-b95ac8b96a26
+
+**A quick tune carries no RF state.** `struct bladerf_quick_tune` on the micro is 5 bytes:
+`nios_profile` (u16), `rffe_profile` (u8), `port`, `spdt` — indices, not settings. The
+16-byte synthesizer snapshot (RFPLL int/frac, VCO varactor + cal offset, CP current, loop
+filter, VCO divider, ALC word) lives in Nios RAM; the AD9361 holds only 8 at a time.
+
+Facts that matter for sweep work:
+- **The retune itself is ~1.8 µs.** `profile_activate()` = 3 SPI transactions:
+  `adi_fastlock_recall()` (ONE write to AD9361 reg 0x25A RX / 0x29A TX), then a
+  read-modify-write of reg 0x004 for port select, plus 2 FPGA PIO writes for the SPDT
+  switches. The LO moves on the first write; the band switch trails ~1 µs. Everything else
+  is transport: USB round trip ≥250 µs, command_uart 40 µs each way at 4 Mbaud (16-byte
+  packets, retune2 magic `'U'` = 0x55; the magic filter is in VHDL, unknown magics are
+  dropped in the fabric).
+- `bladerf_schedule_retune()` **ignores its `frequency` argument entirely** — only
+  `nios_profile` selects the frequency, so a wrong index is invisible at the call site.
+- bladeRF does **not** call ADI's `ad9361_fastlock_recall()`; the Nios hand-rolls it as raw
+  SPI. That bypasses the vendor ALC-collision workaround, and is why libbladeRF sets
+  `rfic_reset_on_close` after any quick-tune use — the source of the ~6 s re-init on next open.
+- The retune2 **response packet carries a `duration` field** (bytes 1–8): the Nios' own
+  measurement of load+activate in sample ticks. libbladeRF unpacks it and discards it at
+  `log_verbose`. Free on-device instrumentation we currently don't read.
+- Nios `do_work()` — which services *scheduled* retunes — runs **only on main-loop
+  iterations with no pending packet**. Control traffic during a sweep directly delays them.
+- Retune queue is 16 deep per direction, **arrival-ordered, not timestamp-sorted**.
+
+### Open questions — NOT verified on hardware
+
+1. **RX gain table may be wrong for the entire sweep.** `ad9361_load_gt()` reloads the RX
+   gain table only on a real `set_frequency`, at band edges **1.3 GHz and 4.0 GHz**; no
+   fastlock path touches it. `_configure_channels_dual()` tunes to `driver.center_freq`, and
+   `sfcw_engine.py` never sets that field — so it is still the **915 MHz** driver default,
+   loading the 200–1300 MHz table for a 2–5 GHz sweep. `h_cal` cancels a constant gain error
+   but not a wrong gain-vs-frequency shape or shifted clipping headroom. Test: set
+   `driver.center_freq` into the sweep band before `_configure_channels_dual()` and compare
+   per-step amplitudes.
+
+2. **Scheduled retunes would silently fail today.** All four `sync_config()` calls in
+   `bladerf_driver.py` use `Format.SC16_Q11`, not `SC16_Q11_META`. Without metadata the
+   `meta_en` signal holds the timestamp counters in reset and the time_tamer FSM never
+   leaves its reset branch, so `tamer_schedule()` is a no-op *with no error* — entries stick
+   in `ENTRY_STATE_SCHEDULED` and after 16 the host gets `QUEUE_FULL` with no hint why.
+   `fpga_builds/README.md` claims META is "already implemented" in the driver; that is
+   **false for this branch**. Fix the format before attempting scheduled retunes.
+   Related: the `meta_en` `RESET_LEVEL` FPGA modification that README documents is **not
+   present** in `~/vikram/bladeRF` (all three synchronizers read `'0'`, tree clean), and
+   would not work anyway — all three wire `reset => '0'`, so the reset branch is dead logic
+   and `RESET_LEVEL` only sets a power-up value the Nios overwrites within 3 clocks via the
+   `meta_sync` GPO.
+
+**Pending optimisation:** `RETUNE_NOW` (`timestamp=0`, what we send today) runs
+`profile_load()` + `profile_activate()` inline. The scheduled path instead runs
+`profile_load_scheduled()`, which pre-loads up to 8 non-colliding profiles ahead of time
+("to reduce retune times", per Nuand's comment). Our 60 MHz step selects master indices
+0, 3, 6, 9… so `% 8` cycles all 8 RFFE slots — nearly every step pays a cold 18-SPI-write
+load today. Gated on fixing the META format above.
+
+## FPGA Guide — published reference doc (docs/fpga-guide/)
+
+A five-chapter technical guide to the bladeRF hosted FPGA image, published as a Claude
+Artifact and **rebuildable from this repo**:
+
+  https://claude.ai/code/artifact/cd0df1ad-2556-428f-a75a-1b02b4236619
+
+Chapters: 01 module inventory · 02 sample round trip (USB→RF→USB) · 03 the NIOS
+(pins, functions, boot/shutdown) · 04 the TX FIFO · 05 the RX FIFO. Single page, sticky
+chapter index, print styles for PDF export.
+
+Sources live in `docs/fpga-guide/`: one `chN.frag.html` per chapter, `base-head.html`
+for shared CSS, `index.frag.html` for front/back matter, and `build_guide.py`.
+
+    cd docs/fpga-guide && python build_guide.py     # -> fpga-guide.out.html
+
+Then publish with the Artifact tool passing `url=` the address above so the link stays
+stable. **`docs/fpga-guide/README.md` is the maintenance guide** — read it before editing:
+it covers adding a chapter (write a fragment, add one entry to the `CHAPTERS` table),
+the available CSS classes, the inline-SVG rules (`currentColor`, self-closing shapes),
+and the theme-token rule that keeps the page readable in dark mode.
+
+The build fails loud on unbalanced tags, unclosed SVG shapes, or a nav/section count
+mismatch. Do not publish if it aborts — a malformed page publishes silently.
+
+Three older artifact URLs (`b4c106cb…`, `3c06de14…`, `79058fd7…`) were standalone
+chapters before the merge; they now serve short "this moved" pointer pages and need no
+maintenance.
+
+Everything in the guide is traced from `bladeRF @ 35174c30` source. **Nothing in it is
+measured on hardware** — several open questions are flagged as such in the text and
+should stay flagged until someone actually measures them.
+
+## Custom FPGA image — what is actually patched (corrected 2026-08-26)
+
+`fpga_builds/hosted_timestamp_enabled.rbf` contains **one** HDL change, in `rx.vhd:140`:
+
+```vhdl
+if( meta_en = '1' or rx_enable = '1' ) then   -- stock: if( meta_en = '1' ) then
+    timestamp_reset <= '0';
+```
+
+`timestamp_reset` becomes `rx_ts_reset` → the RX `time_tamer`'s `ts_reset`. Releasing it
+whenever RX is enabled does **two** things:
+1. the 64-bit sample counter free-runs, giving the Nios a time reference for autonomous
+   frequency stepping; and
+2. **the tamer's compare/interrupt FSM leaves reset.** This is the important one: with
+   stock HDL and a non-META sample format, `tamer_schedule()` is a *silent no-op* — the
+   FSM is pinned in its reset branch, queue entries stick in `ENTRY_STATE_SCHEDULED`
+   forever, and after 16 the host gets `BLADERF_ERR_QUEUE_FULL` with no clue why. This
+   patch is what makes `bladerf_schedule_retune()` work without `SC16_Q11_META`.
+
+Note it does **not** enable metadata framing — the GPIF still sends no 16-byte headers, so
+the host wire format is unchanged and still parses as plain SC16_Q11.
+
+**KNOWN GAP: TX is not patched.** `tx.vhd:110` carries the byte-identical
+`if( meta_en = '1' )` and was left alone, so the TX tamer is still held in reset.
+`pkt_retune2` schedules RX retunes on `RX_TAMER_IRQ` and TX retunes on `TX_TAMER_IRQ`, and
+`sfcw_engine.py` retunes **both** channels every step — so on this image a scheduled sweep
+half-works: RX steps fire, TX steps never do, TX queue fills after 16. Closing it needs the
+mirror edit `or tx_enable = '1'` at `tx.vhd:110` and an FPGA rebuild.
+
+`rx_enable` was the right signal to use — it is the 3-FF synchronized copy of
+`rx_enable_pclk` already in the `rx_clock` domain, so no new CDC hazard.
+
+**`fpga_builds/README.md` described a different, non-functional change** (`RESET_LEVEL => '1'`
+on the three `meta_en` synchronizers at `bladerf-hosted.vhd:802/813/824`). That edit is not
+in the .rbf and would not work: all three wire `reset => '0'`, so the reset branch is dead
+logic and `RESET_LEVEL` only sets a power-up value the Nios overwrites within 3 clocks. A
+correction block has been added at the top of that README.
+
+## bladeRF Source and Nios Simulators (local, undocumented until 2026-08-26)
+
+- **bladeRF source checkout: `~/vikram/bladeRF`** (@ `35174c30`). Note
+  `thirdparty/analogdevicesinc/no-OS` is an **unfetched submodule** — the AD9361 driver is
+  not on disk; fetch pinned commit `0bba46e` if you need it. On the Pi the equivalent tree
+  is `/home/sfr/bladerf-src`.
+- **`pi/radar/nios_sim/sweep_sim`** — aarch64 ELF, built on the Pi at
+  `/home/sfr/version0/pi/radar/nios_sim` from `sweep_sim.c` + the **real** `pkt_retune2.c`.
+  ⚠️ **Only the binary is committed; `sweep_sim.c` exists nowhere in the repo or on this PC.**
+  It entered via `f5c5e44 "removed camera"` (a catch-all commit). Retrieve the source from
+  the Pi and commit it — right now this is an unbuildable, unmodifiable artifact.
+- **`~/vikram/bladeRF/hdl/fpga/platforms/bladerf-micro/software/bladeRF_nios/sim/`** — a
+  full PC simulator of the Nios firmware (real `main()` + all packet handlers as an x86-64
+  binary, hardware replaced by register models, every access traced to console/CSV/VCD for
+  GTKWave). Complete source present, **entirely untracked in git** — it lives only on this
+  machine and will be lost on any re-clone of bladeRF. Its RFIC is a plain register file, so
+  it models packet dispatch and register sequences, not RF behaviour.
 
 ## C-Scan Panel — 2D Raster (replaced the B-scan panel, 2026-08-20)
 

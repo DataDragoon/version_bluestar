@@ -1,5 +1,46 @@
 # FPGA Builds for bladeRF
 
+## ⚠️ CORRECTION (2026-08-26) — read this before the section below
+
+**The "What It Does" description below is WRONG.** It documents a `RESET_LEVEL => '1'` edit
+to the three `meta_en` synchronizers in `bladerf-hosted.vhd` (lines 802/813/824). That is
+**not** the change in this .rbf, and it would not have worked anyway: all three instances
+wire `reset => '0'`, so the reset branch is dead logic and `RESET_LEVEL` only sets a
+power-up value that the Nios overwrites within 3 clocks via the `meta_sync` GPO.
+
+**The actual change is one line in `rx.vhd:140`:**
+
+```vhdl
+-- stock
+if( meta_en = '1' ) then
+    timestamp_reset <= '0';
+
+-- this .rbf
+if( meta_en = '1' or rx_enable = '1' ) then
+    timestamp_reset <= '0';
+```
+
+**What it really does:** `timestamp_reset` becomes `rx_ts_reset`, which is the RX
+`time_tamer`'s `ts_reset`. Releasing it whenever RX is enabled does two things, not one:
+1. the 64-bit sample counter free-runs, giving the Nios a time reference; and
+2. **the tamer's compare/interrupt FSM leaves reset**, which is what makes
+   `bladerf_schedule_retune()` actually function without `SC16_Q11_META`. With stock HDL
+   and a non-META format, `tamer_schedule()` is a silent no-op — entries stick in
+   `ENTRY_STATE_SCHEDULED` forever and the host eventually gets `QUEUE_FULL` with no
+   indication of the cause.
+
+**KNOWN GAP — TX is not patched.** `tx.vhd:110` carries the byte-identical
+`if( meta_en = '1' )` and was left unchanged, so the **TX** tamer is still held in reset.
+`pkt_retune2` schedules RX retunes on `RX_TAMER_IRQ` and TX retunes on `TX_TAMER_IRQ`, and
+`sfcw_engine.py` retunes *both* channels per step — so on this image a scheduled sweep
+would half-work: RX steps fire, TX steps never do. The mirror edit
+(`or tx_enable = '1'` at `tx.vhd:110`) is needed to close it.
+
+Note `rx_enable` is the correct signal to have used: it is the 3-FF synchronized copy of
+`rx_enable_pclk` already in the `rx_clock` domain, so the edit introduces no CDC hazard.
+
+---
+
 ## hosted_timestamp_enabled.rbf
 
 **Built:** 2026-08-23  

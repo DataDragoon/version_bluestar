@@ -1,0 +1,259 @@
+<div class="chapdiv" id="ch2">
+  <p class="n">Chapter 02</p>
+  <h2>The round trip</h2>
+  <p class="dek">One sample, all the way out and all the way back: from a USB bulk transfer, across three clock domains, out of the antenna, and home again. Every module it touches, every wire it rides, and the cycle counts wherever the RTL commits to one.</p>
+  <div class="tally">
+    <div><b>7</b><span>stages each way</span></div>
+    <div><b>2048</b><span>words per transaction</span></div>
+    <div><b>1022</b><span>FIFO ops per message</span></div>
+    <div><b>3</b><span>domain crossings</span></div>
+  </div>
+</div>
+
+<section>
+  <h2>The map</h2>
+  <p class="sub">outbound above, inbound below, clock domains as vertical bands</p>
+  <p>The two directions are near-mirror images, and they share exactly one resource: the 32-bit GPIF bus, which is bidirectional and therefore <strong>half-duplex</strong>. Everything else is duplicated.</p>
+
+  <figure>
+    <svg viewBox="0 0 900 320" role="img" aria-label="Round trip block diagram: outbound path from USB endpoint 0x01 through the FX3, the GPIF bus, the TX FIFO, fifo_reader and axi_ad9361 to the AD9361 DAC; and the inbound path back from the AD9361 ADC through axi_ad9361, fifo_writer, the RX FIFO, the GPIF bus and the FX3 to USB endpoint 0x81.">
+      <defs>
+        <marker id="rt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="rtc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--rust)"/>
+        </marker>
+      </defs>
+
+      <rect x="18" y="44" width="250" height="202" fill="var(--surface-2)" opacity=".55"/>
+      <rect x="399" y="44" width="125" height="202" fill="var(--surface-2)" opacity=".55"/>
+      <g font-family="Archivo, sans-serif" font-size="10.5" font-weight="700" fill="var(--slate)">
+        <text x="26" y="38">FX3 / USB</text>
+        <text x="279" y="38">fx3_pclk</text>
+        <text x="403" y="38">CLOCK CROSSING</text>
+        <text x="531" y="38">l_clk = 2 &#215; f_s</text>
+      </g>
+
+      <g font-family="JetBrains Mono, monospace" font-size="10.5">
+        <rect x="25"  y="62" width="100" height="42" fill="none" stroke="currentColor"/><text x="75"  y="87" text-anchor="middle" fill="currentColor">EP 0x01</text>
+        <rect x="150" y="62" width="100" height="42" fill="none" stroke="currentColor"/><text x="200" y="87" text-anchor="middle" fill="currentColor">FX3 DMA</text>
+        <rect x="275" y="62" width="100" height="42" fill="none" stroke="currentColor"/><text x="325" y="87" text-anchor="middle" fill="currentColor">fx3_gpif</text>
+        <rect x="400" y="62" width="100" height="42" fill="none" stroke="currentColor"/><text x="450" y="87" text-anchor="middle" fill="currentColor">tx_fifo</text>
+        <rect x="525" y="62" width="100" height="42" fill="none" stroke="currentColor"/><text x="575" y="87" text-anchor="middle" fill="currentColor">fifo_reader</text>
+        <rect x="650" y="62" width="100" height="42" fill="none" stroke="currentColor"/><text x="700" y="87" text-anchor="middle" fill="currentColor">axi_ad9361</text>
+        <rect x="775" y="62" width="100" height="42" fill="none" stroke="var(--rust)" stroke-width="1.5"/><text x="825" y="87" text-anchor="middle" fill="var(--rust)">AD9361 DAC</text>
+      </g>
+      <g stroke="currentColor" stroke-width="1">
+        <line x1="125" y1="83" x2="146" y2="83" marker-end="url(#rt)"/>
+        <line x1="250" y1="83" x2="271" y2="83" marker-end="url(#rt)"/>
+        <line x1="375" y1="83" x2="396" y2="83" marker-end="url(#rt)"/>
+        <line x1="500" y1="83" x2="521" y2="83" marker-end="url(#rt)"/>
+        <line x1="625" y1="83" x2="646" y2="83" marker-end="url(#rt)"/>
+        <line x1="750" y1="83" x2="771" y2="83" marker-end="url(#rt)"/>
+      </g>
+      <g font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)" text-anchor="middle">
+        <text x="75"  y="120">bulk OUT</text>
+        <text x="200" y="120">PIB_SKT_3</text>
+        <text x="325" y="120">fx3_gpif[31:0]</text>
+        <text x="450" y="120">32&#8594;64 dcfifo</text>
+        <text x="575" y="120">dac_streams</text>
+        <text x="700" y="120">adi_tx_data[5:0]</text>
+        <text x="825" y="120">TX1 / TX2</text>
+      </g>
+
+      <g font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--slate)" text-anchor="middle">
+        <text x="75"  y="170">bulk IN</text>
+        <text x="200" y="170">PIB_SKT_0</text>
+        <text x="325" y="170">fx3_gpif[31:0]</text>
+        <text x="450" y="170">64&#8594;32 dcfifo</text>
+        <text x="575" y="170">adc_streams</text>
+        <text x="700" y="170">adi_rx_data[5:0]</text>
+        <text x="825" y="170">RX1 / RX2</text>
+      </g>
+      <g font-family="JetBrains Mono, monospace" font-size="10.5">
+        <rect x="25"  y="182" width="100" height="42" fill="none" stroke="currentColor"/><text x="75"  y="207" text-anchor="middle" fill="currentColor">EP 0x81</text>
+        <rect x="150" y="182" width="100" height="42" fill="none" stroke="currentColor"/><text x="200" y="207" text-anchor="middle" fill="currentColor">FX3 DMA</text>
+        <rect x="275" y="182" width="100" height="42" fill="none" stroke="currentColor"/><text x="325" y="207" text-anchor="middle" fill="currentColor">fx3_gpif</text>
+        <rect x="400" y="182" width="100" height="42" fill="none" stroke="currentColor"/><text x="450" y="207" text-anchor="middle" fill="currentColor">rx_fifo</text>
+        <rect x="525" y="182" width="100" height="42" fill="none" stroke="currentColor"/><text x="575" y="207" text-anchor="middle" fill="currentColor">fifo_writer</text>
+        <rect x="650" y="182" width="100" height="42" fill="none" stroke="currentColor"/><text x="700" y="207" text-anchor="middle" fill="currentColor">axi_ad9361</text>
+        <rect x="775" y="182" width="100" height="42" fill="none" stroke="var(--rust)" stroke-width="1.5"/><text x="825" y="207" text-anchor="middle" fill="var(--rust)">AD9361 ADC</text>
+      </g>
+      <g stroke="currentColor" stroke-width="1">
+        <line x1="146" y1="203" x2="125" y2="203" marker-end="url(#rt)"/>
+        <line x1="271" y1="203" x2="250" y2="203" marker-end="url(#rt)"/>
+        <line x1="396" y1="203" x2="375" y2="203" marker-end="url(#rt)"/>
+        <line x1="521" y1="203" x2="500" y2="203" marker-end="url(#rt)"/>
+        <line x1="646" y1="203" x2="625" y2="203" marker-end="url(#rt)"/>
+        <line x1="771" y1="203" x2="750" y2="203" marker-end="url(#rt)"/>
+      </g>
+
+      <path d="M 875 83 L 892 83 L 892 203 L 875 203" fill="none" stroke="var(--rust)" stroke-width="1.25" marker-end="url(#rtc)"/>
+
+      <line x1="18" y1="268" x2="882" y2="268" stroke="var(--rule)"/>
+      <text x="18" y="288" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--slate)">fx3_gpif[31:0] is ONE bidirectional bus shared by both rows &#8212; the only half-duplex link in the chain.</text>
+      <text x="18" y="304" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--slate)">Everything right of the FIFOs runs on the AD9361 clock; nothing else in the FPGA does.</text>
+    </svg>
+    <figcaption><b>The round trip.</b> Seven stages each way, joined at the right by the RF path through the antenna. The FIFOs are the only place a sample changes clock domain, and the GPIF bus is the only place the two directions contend.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>Outbound &mdash; USB to the antenna</h2>
+
+  <div class="stagerow"><span class="sn">1</span><h3>The host hands over a buffer</h3></div>
+  <div class="wires"><b>EP 0x01 OUT</b> &#183; bulk &#183; 512 B (HS) / 1024 B (SS) packets</div>
+  <p>Samples and control travel on completely separate endpoints &mdash; control is <code>0x02</code>/<code>0x82</code>, samples are <code>0x01</code>/<code>0x81</code>. The FX3 firmware sets up two AUTO DMA channels and then never touches sample data again: the USB producer socket feeds <strong><code>PIB_SOCKET_3</code></strong> outbound, and <strong><code>PIB_SOCKET_0</code></strong> feeds the USB consumer inbound. DMA buffers are <code>packet_size &#215; 8</code> &mdash; <strong>4096 bytes on High Speed, 8192 on SuperSpeed</strong> &mdash; eleven deep.</p>
+  <p>libbladeRF enforces the match from its end: every buffer you configure must be a whole multiple of 8192 bytes, or it silently rounds up and warns.</p>
+
+  <div class="stagerow"><span class="sn">2</span><h3>Across the GPIF bus</h3></div>
+  <div class="wires"><b>fx3_pclk</b> (in) &#183; <b>fx3_gpif[31:0]</b> (inout) &#183; <b>fx3_ctl[12:0]</b> (inout)</div>
+  <p>The FX3 is the clock master. The timing constraint sets the pin at 100&nbsp;MHz; the firmware programs the PIB clock as <code>SYS_CLK/4</code>, which on the SDK default would be 96&nbsp;MHz. The SDK is not in the repo, so the real figure sits somewhere between those two.</p>
+  <p>The control bus is asymmetric in a way worth remembering: <strong>bits 0&ndash;3 are FPGA outputs</strong> (the DMA acknowledgements), <strong>4&ndash;12 are inputs</strong> (enables, idle, and four active-low DMA requests). Bit 9 is unusable because it carries DCLK, which is why the RX-1 request was relocated to bit 12. Only two of the four DMA channels are ever used &mdash; the FPGA always acknowledges on <code>RX0</code> and <code>TX3</code>, so two of the four ack lines are permanently zero.</p>
+  <p>A transaction moves exactly one DMA buffer and then returns to idle. One 32-bit bus word is <strong>one SC16Q11 sample</strong>.</p>
+
+  <div class="scroller" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>Phase</th><th>Cycles (SS)</th><th>What happens</th></tr></thead>
+      <tbody>
+        <tr><td>IDLE</td><td class="num">&#8805; 1</td><td>arbitration; seeds the word counter</td></tr>
+        <tr><td>SETUP_WR</td><td class="num">5</td><td>ack asserted early to cover FX3 turnaround</td></tr>
+        <tr><td>META_WRITE</td><td class="num">4</td><td>the 16-byte header shifts into a 128-bit buffer</td></tr>
+        <tr class="hot"><td>SAMPLE_WRITE</td><td class="num">2044</td><td>payload straight into the TX sample FIFO</td></tr>
+        <tr><td>FINISHED</td><td class="num">11</td><td>about 4 cycles bus release, 7 guard band</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Total <strong>2065 cycles for 8192 bytes</strong> &mdash; roughly 99% bus efficiency. The metadata lives <em>inside</em> the 2048-word buffer rather than on top of it, so enabling it costs four samples and zero extra cycles.</p>
+  <p>Two behaviours matter for a radar sweep. <strong>Arbitration favours TX</strong>: RX only pre-empts once its FIFO passes a critical watermark, deliberately, to avoid discontinuities in the transmitted signal. And because the bus is one set of wires, <strong>every direction change costs a dead gap</strong> &mdash; 13 cycles RX&#8594;TX, 16 cycles TX&#8594;RX.</p>
+
+  <div class="stagerow"><span class="sn">3</span><h3>Out of the FIFO, into the DAC</h3></div>
+  <div class="wires"><b>tx_sample_fifo</b> 32&#8594;64, 8192 deep &#183; <b>tx_meta_fifo</b> 32&#8594;128 &#183; both show-ahead</div>
+  <p><code>fifo_reader</code> runs two independent state machines on <code>tx_clock</code>. The <strong>meta FSM</strong> walks <code>META_LOAD &#8594; META_WAIT &#8594; META_DOWNCOUNT</code>; the <strong>sample FSM</strong> walks <code>COMPUTE_ENABLED_CHANNELS &#8594; COMPUTE_OFFSETS &#8594; READ_SAMPLES</code>. Those first two sample states are one cycle each and exist purely to recompute the channel packing whenever the FIFO runs dry.</p>
+  <p>Only <strong>two fields of the 16-byte header are ever parsed by the FPGA</strong>: the 64-bit timestamp, and in packet mode the length. The flags word &mdash; <code>BURST_START</code>, <code>BURST_END</code>, <code>TX_NOW</code> &mdash; is never read by any RTL; those are host-side bookkeeping. <code>TX_NOW</code> is encoded in the <em>timestamp</em> instead: the host writes zero, the reader subtracts one, it wraps to all-ones, and the comparison short-circuits.</p>
+  <p>The 64-bit read word unpacks with the sign-extension bits discarded &mdash; the FPGA re-derives sign from bit 11:</p>
+  <div class="scroller" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>Bits</th><th>63:60</th><th>59:48</th><th>47:44</th><th>43:32</th><th>31:28</th><th>27:16</th><th>15:12</th><th>11:0</th></tr></thead>
+      <tbody><tr><td>Field</td><td>discard</td><td>Q1</td><td>discard</td><td>I1</td><td>discard</td><td>Q0</td><td>discard</td><td>I0</td></tr></tbody>
+    </table>
+  </div>
+  <p>With both channels enabled that is one FIFO read per sample instant &mdash; <strong>1022 reads per 2044-word message</strong>, exactly matching the meta FSM downcount. With one channel enabled, a single read serves two consecutive samples.</p>
+  <p>From the release comparison going true it is <strong>2 <code>tx_clock</code> cycles to <code>data_v</code>, 3 to the AD9361 data register</strong>. The <code>&minus;1</code> baked into the timestamp comparison exists precisely to pay for that pipeline.</p>
+
+  <div class="note">
+    <p class="h">Idle does not mean zero</p>
+    <p>When the FIFO runs dry, when a burst is not yet due, when the trigger is armed but unfired, or when <code>tx_enable</code> drops &mdash; <code>data_v</code> goes low and <strong>the DAC register simply holds its last value</strong>. It does not flush to zero. That is why libbladeRF zero-pads the tail of every burst in software, and why the metadata contract requires the last samples of a discontinuity to be <code>(0+0j)</code>.</p>
+  </div>
+
+  <p>One more surprise here: the multi-board <strong>trigger does not gate samples at all</strong>. It forges the FIFO&rsquo;s <code>empty</code> flag, so armed-but-unfired makes the reader believe the FIFO is permanently dry. A side effect is that an armed, unfired TX lights the underflow LED continuously. Once it fires, samples flow <em>immediately</em> at whatever the current time is, because the burst&rsquo;s scheduled timestamp was already consumed while waiting.</p>
+</section>
+
+<section>
+  <h2>The crossing</h2>
+  <p class="sub">8 LVDS pairs each way &#183; 6 data lanes, frame, clock</p>
+  <p>This is the one part of the chain the FPGA does not define. The AD9361 is <strong>always in 2R2T LVDS mode</strong> on this board, so the framing never changes regardless of how many channels you enable.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 272" role="img" aria-label="LVDS framing timing diagram: DATA_CLK toggles every unit interval, RX_FRAME is a 50 percent duty square wave over 8 unit intervals, and the six data lanes carry I and Q half-words in alternating slots, four slots per channel.">
+      <text x="14" y="47" font-family="Archivo, sans-serif" font-size="11" font-weight="700" fill="currentColor">DATA_CLK</text>
+      <path d="M 110 30 L 178 30 L 178 55 L 246 55 L 246 30 L 314 30 L 314 55 L 382 55 L 382 30 L 450 30 L 450 55 L 518 55 L 518 30 L 586 30 L 586 55 L 654 55" fill="none" stroke="currentColor" stroke-width="1.5"/>
+
+      <text x="14" y="107" font-family="Archivo, sans-serif" font-size="11" font-weight="700" fill="currentColor">RX_FRAME</text>
+      <path d="M 110 90 L 382 90 L 382 115 L 654 115" fill="none" stroke="var(--rust)" stroke-width="1.5"/>
+      <text x="246" y="84" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--rust)" text-anchor="middle">HIGH = channel 0</text>
+      <text x="518" y="132" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--rust)" text-anchor="middle">LOW = channel 1</text>
+
+      <text x="14" y="168" font-family="Archivo, sans-serif" font-size="11" font-weight="700" fill="currentColor">DATA[5:0]</text>
+      <g font-family="JetBrains Mono, monospace" font-size="9.5" text-anchor="middle">
+        <rect x="111" y="148" width="66" height="32" fill="none" stroke="currentColor"/><text x="144" y="168" fill="currentColor">I0[11:6]</text>
+        <rect x="179" y="148" width="66" height="32" fill="none" stroke="currentColor"/><text x="212" y="168" fill="currentColor">Q0[11:6]</text>
+        <rect x="247" y="148" width="66" height="32" fill="none" stroke="currentColor"/><text x="280" y="168" fill="currentColor">I0[5:0]</text>
+        <rect x="315" y="148" width="66" height="32" fill="none" stroke="currentColor"/><text x="348" y="168" fill="currentColor">Q0[5:0]</text>
+        <rect x="383" y="148" width="66" height="32" fill="none" stroke="currentColor"/><text x="416" y="168" fill="currentColor">I1[11:6]</text>
+        <rect x="451" y="148" width="66" height="32" fill="none" stroke="currentColor"/><text x="484" y="168" fill="currentColor">Q1[11:6]</text>
+        <rect x="519" y="148" width="66" height="32" fill="none" stroke="currentColor"/><text x="552" y="168" fill="currentColor">I1[5:0]</text>
+        <rect x="587" y="148" width="66" height="32" fill="none" stroke="currentColor"/><text x="620" y="168" fill="currentColor">Q1[5:0]</text>
+      </g>
+
+      <path d="M 111 196 L 111 204 L 381 204 L 381 196" fill="none" stroke="var(--indigo)" stroke-width="1.25"/>
+      <text x="246" y="220" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--indigo)" text-anchor="middle">1 l_clk = 24 bits = one channel I + Q</text>
+
+      <path d="M 111 236 L 111 244 L 653 244 L 653 236" fill="none" stroke="currentColor" stroke-width="1.25"/>
+      <text x="382" y="260" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--slate)" text-anchor="middle">8 UI = 4 DATA_CLK = 2 l_clk = one sample period (1 / f_s)</text>
+    </svg>
+    <figcaption><b>How 12-bit I and Q cross six wires.</b> Even slots carry I, odd slots carry Q, most-significant half first. FRAME is a 50%-duty square wave that delimits <em>channel</em>, not I/Q.</figcaption>
+  </figure>
+
+  <p>The clock chain follows from that geometry: <strong>DATA_CLK = 4 &#215; f<sub>s</sub></strong>, and the factor-4 DDR deserializer halves it, so <strong>l_clk = 2 &#215; f<sub>s</sub></strong>. At a 10&nbsp;Msps sweep that is a 40&nbsp;MHz link clock and a 20&nbsp;MHz fabric clock. The TX side has no clock of its own &mdash; it is regenerated from the RX pin through a shared PLL, so <strong>the AD9361&rsquo;s DATA_CLK is the single clock source for the entire radio datapath</strong>.</p>
+  <p>Frame lock is self-checking: every 4-slot frame nibble must be the bitwise inverse of the previous one, which holds only if the period is exactly 8 UI. That check drives the core&rsquo;s status bit.</p>
+  <p>One detail that cancels out but will confuse anyone reading registers: the AD9361 has <strong>I/Q swap enabled on both ports</strong>, so what the RTL calls &ldquo;I&rdquo; is the part&rsquo;s Q. Deliberate, and symmetric end to end.</p>
+</section>
+
+<section>
+  <h2>Inbound &mdash; antenna to USB</h2>
+
+  <div class="stagerow"><span class="sn">4</span><h3>Through the ADI core</h3></div>
+  <div class="wires"><b>ad9361_adc_{i0,q0,i1,q1}</b> &#183; each carries <b>enable</b>, <b>valid</b>, <b>data[15:0]</b></div>
+  <p>Twelve <code>l_clk</code> cycles of countable pipeline sit between the deserializer and the fabric: frame decode, 48-bit assembly, data formatting, DC filter, IQ correction. All four channels are bit-identical, so there is <strong>zero relative skew</strong> between I and Q or between channels. Channel 0 trails channel 1 by one cycle, because it waits in the assembly register for its partner.</p>
+  <p><code>valid</code> arrives <strong>once every two <code>l_clk</code> cycles</strong> &mdash; the same rate whether one channel or two is enabled. What changes is how many streams carry payload on it.</p>
+  <p>The <code>enable</code> line is a trap: it is a <strong>static configuration register bit</strong>, not a per-cycle data qualifier. It means &ldquo;this channel is configured&rdquo;, and the fabric treats it that way. The 12-bit sample arrives sign-extended and right-justified in 16 bits &mdash; note the asymmetry with TX, which is left-justified.</p>
+
+  <div class="stagerow"><span class="sn">5</span><h3>Packed into the FIFO</h3></div>
+  <div class="wires"><b>adc_streams</b> / <b>adc_controls</b> &#8594; <b>rx_mux</b> &#8594; <b>fifo_writer</b> &#8594; <b>rx_sample_fifo</b> 64&#8594;32</div>
+  <p><code>rx_mux</code> is the single register in the RX sample path, and it is where test sources substitute: a 12-bit ramp, a 32-bit counter, or the digital loopback FIFO fed from TX. All are explicit host commands; nothing switches automatically. The trigger gate is applied <strong>only in normal mode</strong> &mdash; counter and loopback modes bypass it entirely.</p>
+  <p><code>fifo_writer</code> packs by shifting 32 bits into the top of a 64-bit word for each enabled channel, so a MIMO pair fills one word in a single call:</p>
+  <div class="scroller" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>Mode</th><th>63:48</th><th>47:32</th><th>31:16</th><th>15:0</th></tr></thead>
+      <tbody>
+        <tr class="hot"><td>ch0 + ch1</td><td>Q1</td><td>I1</td><td>Q0</td><td>I0</td></tr>
+        <tr><td>one channel</td><td>Q (newer)</td><td>I (newer)</td><td>Q (older)</td><td>I (older)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>From a <code>valid</code> at the fabric boundary to the word resident in the FIFO is <strong>4 <code>rx_clock</code> edges</strong>. The write cadence is one word every 2 cycles in MIMO, every 4 with a single channel &mdash; and either way <strong>1022 writes per message</strong>, mirroring the TX side exactly.</p>
+
+  <div class="stagerow"><span class="sn">6</span><h3>The metadata header</h3></div>
+  <div class="wires">128-bit word &#183; emitted least-significant dword first &#183; 4 bus words</div>
+  <p>The header is recomputed <em>combinationally every cycle</em> from the live timestamp and registered on every edge, so whichever cycle the meta FSM chooses to write, the value is current. On the wire it reads: magic <code>0x12344321</code>, timestamp low, timestamp high, flags &mdash; the <strong>timestamp little-endian across two words, flags last</strong>.</p>
+  <p>The timestamp itself is a <strong>free-running divide-by-two of <code>rx_clock</code></strong>, so it increments once per sample period and is <em>never</em> gated on data. It is held in reset whenever metadata mode is off.</p>
+
+  <div class="note">
+    <p class="h">There is no RX overrun status bit</p>
+    <p>The FPGA detects the condition &mdash; and then only blinks LED3. The overflow counter output is left unconnected in <code>rx.vhd</code> and synthesized away. <strong>The host infers overrun purely from a discontinuity in the header timestamps</strong>, which means without the metadata format there is no overrun detection at all. The <code>underrun</code> bit that <em>does</em> appear in the RX header is a <em>TX</em> condition, patched in on the way out &mdash; so you need an RX stream running to observe TX underruns.</p>
+  </div>
+
+  <div class="stagerow"><span class="sn">7</span><h3>Home</h3></div>
+  <div class="wires"><b>SETUP_RD</b> 3 &#183; <b>META_READ</b> 1 &#183; <b>SAMPLE_READ</b> 2044 &#183; <b>FINISHED</b> 11</div>
+  <p>The return transaction is five cycles shorter than the outbound one &mdash; 2060 against 2065 &mdash; because the RX acknowledgement can be asserted later. The FIFOs are show-ahead, so the head word is already presented and no read-latency bubble is needed; header and payload run contiguously with no gap at the boundary.</p>
+  <p>Then back out through <code>PIB_SOCKET_0</code>, into the USB consumer socket, and up <strong>EP 0x81</strong> to the host.</p>
+</section>
+
+<section>
+  <h2>What the round trip costs</h2>
+  <p class="sub">derived from transaction counts and configured clock rates</p>
+  <div class="scroller">
+    <table>
+      <thead><tr><th>Quantity</th><th>SuperSpeed</th><th>High Speed</th></tr></thead>
+      <tbody>
+        <tr><td>Words per transaction</td><td class="num">2048</td><td class="num">1024</td></tr>
+        <tr><td>Payload words</td><td class="num">2044</td><td class="num">1020</td></tr>
+        <tr><td>Bytes per buffer</td><td class="num">8192</td><td class="num">4096</td></tr>
+        <tr><td>FIFO ops per message</td><td class="num">1022</td><td class="num">510</td></tr>
+        <tr class="hot"><td>RX transaction</td><td class="num">2060 cy</td><td class="num">1036 cy</td></tr>
+        <tr class="hot"><td>TX transaction</td><td class="num">2065 cy</td><td class="num">1041 cy</td></tr>
+        <tr><td>Turnaround RX&#8594;TX</td><td class="num">13 cy</td><td class="num">13 cy</td></tr>
+        <tr><td>Turnaround TX&#8594;RX</td><td class="num">16 cy</td><td class="num">16 cy</td></tr>
+        <tr><td>Bus efficiency</td><td class="num">~99%</td><td class="num">~98%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="axis">One discrepancy I could not resolve</h3>
+  <p>The RX cadence is firmly established &mdash; a strobe every two <code>l_clk</code> cycles, cross-checked against the testbench&rsquo;s own timestamp assertions. The TX side should mirror it, same framing and same clock, but the DAC rate register is programmed to <code>DAC_RATE(3)</code> in 2R2T LVDS mode, which makes the ADI core request data <strong>every four cycles, not two</strong>.</p>
+  <p>I could not reconcile those from source. The AD9361 clock-tree code that would settle it lives in an unfetched submodule. Practically it does not threaten correctness &mdash; the FPGA logic is rate-agnostic, emitting exactly one sample per request and reading one 64-bit word per two samples whatever the ratio &mdash; but the absolute TX sample rate is not something this repo can confirm. Comparing the TX and RX timestamp rates on hardware would settle it in a minute.</p>
+</section>
+
