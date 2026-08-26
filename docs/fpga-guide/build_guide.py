@@ -97,7 +97,8 @@ CHAPTERS = [
             'becomes per-channel samples, and why an idle transmitter is not a silent one.',
         tally=[('2', 'state machines'), ('1022', 'reads per message'),
                ('&plusmn;2047', 'silent truncation'), ('1', 'state unreachable')],
-        nav=['What it is', 'Two machines, one licence', 'What one read serves',
+        nav=['What it is', 'Two machines, one licence', 'The three sample formats',
+             'What one read serves',
              'The timestamp gate', 'Idle is not silent', 'Wired but unread'],
     ),
     dict(

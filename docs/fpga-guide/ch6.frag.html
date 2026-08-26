@@ -135,6 +135,53 @@
 </section>
 
 <section>
+  <h2>The three sample formats</h2>
+  <p class="sub">what SC16_Q11, 8-bit and SC12Q11 actually are on the wire</p>
+  <p>Two mode bits select between three layouts of the 64-bit FIFO word. Everything else in this chapter and the next is a consequence of which one is active, so it is worth pinning down first. All three are <strong>properties of the FIFO word</strong>, not of either module &mdash; the reader unpacks what the writer packed, and the host sees the same bytes.</p>
+
+  <div class="scroller" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>Format</th><th>Host enum</th><th>I / Q width</th><th>Bytes per sample</th><th>IQ pairs per 64-bit word</th></tr></thead>
+      <tbody>
+        <tr class="hot"><td>SC16_Q11</td><td><code>BLADERF_FORMAT_SC16_Q11</code></td><td class="num">16 (12 used)</td><td class="num">4</td><td class="num">2</td></tr>
+        <tr><td>8-bit</td><td><code>BLADERF_FORMAT_SC8_Q7</code></td><td class="num">8</td><td class="num">2</td><td class="num">4</td></tr>
+        <tr><td>SC12Q11</td><td><code>BLADERF_FORMAT_SC16_Q11_PACKED</code></td><td class="num">12</td><td class="num">3</td><td>8 per <b>3</b> words</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>The selectors are <code>eight_bit_mode_en</code> and <code>highly_packed_mode_en</code>, both NIOS control-register bits arriving through synchronizers. Note the asymmetry in how they are wired: the eight-bit bit is <em>per direction</em> (<code>eightbit_en_tx</code>, <code>eightbit_en_rx</code>), but <strong><code>highly_packed_en_txrx</code> is a single bit shared by both</strong> &mdash; you cannot run packed transmit alongside unpacked receive.</p>
+
+  <h3 class="axis">SC16_Q11 &mdash; the default, and the one the SFCW build uses</h3>
+  <p>Four 16-bit lanes, Q1 I1 Q0 I0 from the top down. Q11 means eleven fractional bits, so the usable range is <strong>&plusmn;2047</strong> and only bits 11:0 of each lane carry signal. The remaining nibble is sign extension &mdash; which the writer stores faithfully and the reader throws away, as the next section covers.</p>
+
+  <h3 class="axis">8-bit &mdash; half the bandwidth, a quarter of the resolution</h3>
+  <p>The packer keeps <code>data_i(11 downto 4)</code> and <code>data_q(11 downto 4)</code> &mdash; the <em>top</em> eight bits of the twelve. Full scale is unchanged; what is lost is the bottom four fractional bits, so this trades roughly <strong>24 dB of resolution for half the USB bandwidth</strong>. Two complete sample sets fit in one 64-bit word:</p>
+<pre>|          Sample Set 1         |          Sample Set 0         |
+| 63:56 | 55:48 | 47:40 | 39:32 | 31:24 | 23:16 |  15:8 |  7:0  |
+|  Q1   |  I1   |  Q0   |  I0   |  Q1   |  I1   |  Q0   |  I0   |   both channels
+|  Q0'  |  I0'  |  Q0   |  I0   |  Q0'  |  I0'  |  Q0   |  I0   |   channel 0 only</pre>
+  <p>That doubling is why the FIFO is touched on only alternate requests: one word now holds two sample instants, so the module toggles a one-bit phase (<code>eight_bit_sample_sel</code> in the reader, <code>eight_bit_delay</code> in the writer) and accesses the FIFO on every second one.</p>
+
+  <h3 class="axis">SC12Q11 &mdash; no waste, at the cost of straddling</h3>
+  <p>Twelve bits each for I and Q, so <strong>24 bits per IQ pair</strong> and nothing discarded. 24 does not divide 64, so pairs cross word boundaries and the layout only repeats every three words &mdash; eight complete pairs per three 64-bit words:</p>
+<pre>Cycle 1: | 63:60 | 59:48 | 47:36 | 35:24 | 23:12 | 11:0  |
+         |  Q0'  |  I0   |  Q1   |  I1   |  Q0   |  I0   |    4-bit overlap at the top
+
+Cycle 2: | 63:56 | 55:44 | 43:32 | 31:20 | 19:8  |  7:0  |
+         |  I1'  |  Q0   |  I0   |  Q1   |  I1   |  Q0'  |    8-bit overlap both ends
+
+Cycle 3: | 63:52 | 51:40 | 39:28 | 27:16 | 15:4  |  3:0  |
+         |  Q1   |  I1   |  Q0   |  I0   |  Q1   |  I1'  |    4-bit overlap at the bottom</pre>
+  <p>Apostrophes mark the partial samples. Each side runs a four-phase counter to track which cycle it is on, and skips the FIFO access on one phase in four &mdash; the reader because the fourth set of samples comes entirely out of its carry buffer, the writer because the accumulator is not yet full.</p>
+
+  <div class="note">
+    <p class="h">Which one your sweep is running</p>
+    <p>Plain <strong>SC16_Q11</strong>, with <code>meta_en</code> off. Both alternative formats are selected by NIOS control bits that <code>sfcw_engine.py</code> never sets, so every packed-mode branch described here is present in the bitstream and never entered on this build. That matters for reading the rest of the chapter: several of the defects below sit in code paths this configuration cannot reach.</p>
+  </div>
+</section>
+
+<section>
   <h2>What one read serves</h2>
   <p class="sub">the cadence, and what gets thrown away</p>
   <p>A single 64-bit word can satisfy more than one request. The governing quantity is <code>samples_left_init = NUM_STREAMS &minus; enabled_channels</code>:</p>

@@ -130,7 +130,8 @@ end if;</pre>
 <section>
   <h2>How samples get packed</h2>
   <p class="sub">a right-shifting register with insertion at the top</p>
-  <p>All three packing modes work the same way: shift the accumulator right by one slot, insert the new sample at the top, once per enabled-and-valid channel. Since channel 0 is processed first, channel 1 ends up above it.</p>
+  <p>Chapter 6 defines the three formats &mdash; SC16_Q11, 8-bit and SC12Q11 &mdash; and their bit layouts. This is the other half: how the accumulator that produces them actually fills.</p>
+  <p>All three packing modes work the same way: shift the accumulator right by one slot, insert the new sample at the top, once per enabled-and-valid channel. Since channel 0 is processed first, channel 1 ends up above it. The three <code>pack</code> functions differ only in the slot width they shift by &mdash; 32 bits for SC16_Q11, 16 for eight-bit, 24 for SC12Q11 &mdash; which is why one loop body serves all three.</p>
 
   <div class="scroller" style="margin-bottom:20px">
     <table>
